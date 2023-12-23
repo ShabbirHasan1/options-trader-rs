@@ -15,5 +15,5 @@ Cargo.lock
 
 .tmp/*
 service_client.json
-./tools/*
+tools/
 .vscode/*
