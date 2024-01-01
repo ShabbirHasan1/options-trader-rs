@@ -14,7 +14,7 @@ use super::settings::Settings;
 pub struct SqlQueryBuilder;
 
 impl SqlQueryBuilder {
-    pub fn prepare_insert_statement(&self, table: &str, columns: &Vec<&str>) -> String {
+    pub fn prepare_insert_statement(table: &str, columns: &Vec<&str>) -> String {
         let sql = format!("INSERT INTO {} ({})", table, columns.join(", "));
         let placeholders: String = (1..=columns.len())
             .map(|i| format!("${}", i))
@@ -24,7 +24,7 @@ impl SqlQueryBuilder {
         format!("{} VALUES ({})", sql, placeholders)
     }
 
-    pub fn prepare_update_statement(&self, table: &str, columns: &Vec<&str>) -> String {
+    pub fn prepare_update_statement(table: &str, columns: &Vec<&str>) -> String {
         let sql = format!("UPDATE {} SET", table);
 
         let placeholders: String = (1..=columns.len() - 1)
@@ -42,14 +42,14 @@ impl SqlQueryBuilder {
         )
     }
 
-    pub fn prepare_fetch_statement(&self, table: &str, columns: &Vec<&str>) -> String {
-        if columns.is_empty() {
+    pub fn prepare_fetch_statement(table: &str, filters: &Vec<&str>) -> String {
+        if filters.is_empty() {
             return format!("SELECT * FROM {}", table);
         }
 
         let sql = format!("SELECT * FROM {}", table);
-        let placeholders: String = (1..=columns.len())
-            .map(|i| format!("{} = ${}", columns[i - 1], i))
+        let placeholders: String = (1..=filters.len())
+            .map(|i| format!("{} = ${}", filters[i - 1], i))
             .collect::<Vec<String>>()
             .join(" AND ");
 
@@ -58,7 +58,7 @@ impl SqlQueryBuilder {
     }
 
     #[cfg(test)]
-    pub fn prepare_delete_statement(&self, table: &str, columns: &Vec<&str>) -> String {
+    pub fn prepare_delete_statement(table: &str, columns: &Vec<&str>) -> String {
         if columns.is_empty() {
             return format!("DELETE FROM {}", table);
         }
@@ -76,7 +76,6 @@ impl SqlQueryBuilder {
 #[derive(Debug)]
 pub struct DBClient {
     pub pool: Pool<Postgres>,
-    query_builder: SqlQueryBuilder,
 }
 
 impl DBClient {
@@ -105,25 +104,14 @@ impl DBClient {
             }
         };
 
-        Ok(DBClient {
-            pool,
-            query_builder: SqlQueryBuilder {},
-        })
+        Ok(Self { pool })
     }
 
-    pub fn get_sql_stmt(
-        &self,
-        table_name: &str,
-        local_id: &Uuid,
-        columns: Vec<&str>,
-        db: &Arc<DBClient>,
-    ) -> String {
-        if Uuid::is_nil(local_id) {
-            db.query_builder
-                .prepare_insert_statement(table_name, &columns)
+    pub fn get_sql_stmt(&self, table_name: &str, local_id: &Uuid, columns: Vec<&str>) -> String {
+        if Uuid::is_nil(local_id) && !table_name.eq("tasty_auth") {
+            SqlQueryBuilder::prepare_insert_statement(table_name, &columns)
         } else {
-            db.query_builder
-                .prepare_update_statement(table_name, &columns)
+            SqlQueryBuilder::prepare_update_statement(table_name, &columns)
         }
     }
 }
@@ -141,7 +129,7 @@ mod tests {
 
         let table = "test";
         let columns = vec!["one", "two", "three", "four"];
-        let sql = builder.prepare_insert_statement(table, &columns);
+        let sql = SqlQueryBuilder::prepare_insert_statement(table, &columns);
         assert_eq!(
             sql,
             "INSERT INTO test (one, two, three, four) VALUES ($1, $2, $3, $4)"
@@ -150,11 +138,9 @@ mod tests {
 
     #[test]
     fn test_sql_update_statement() {
-        let builder = SqlQueryBuilder {};
-
         let table = "test";
         let columns = vec!["one", "two", "three", "four", "local_id"];
-        let sql = builder.prepare_update_statement(table, &columns);
+        let sql = SqlQueryBuilder::prepare_update_statement(table, &columns);
         assert_eq!(
             sql,
             "UPDATE test SET one = $1, two = $2, three = $3, four = $4 WHERE local_id = $5"
@@ -163,20 +149,16 @@ mod tests {
 
     #[test]
     fn test_sql_fetch_statement_whole_table() {
-        let builder = SqlQueryBuilder {};
-
         let table = "test";
-        let sql = builder.prepare_fetch_statement(table, &Vec::default());
+        let sql = SqlQueryBuilder::prepare_fetch_statement(table, &Vec::default());
         assert_eq!(sql, "SELECT * FROM test");
     }
 
     #[test]
     fn test_sql_fetch_statement_with_filter() {
-        let builder = SqlQueryBuilder {};
-
         let table = "test";
         let columns = vec!["one", "two", "three"];
-        let sql = builder.prepare_fetch_statement(table, &columns);
+        let sql = SqlQueryBuilder::prepare_fetch_statement(table, &columns);
         assert_eq!(
             sql,
             "SELECT * FROM test WHERE one = $1 AND two = $2 AND three = $3"
@@ -185,20 +167,16 @@ mod tests {
 
     #[test]
     fn test_sql_delete_statement() {
-        let builder = SqlQueryBuilder {};
-
         let table = "test";
-        let sql = builder.prepare_delete_statement(table, &Vec::default());
+        let sql = SqlQueryBuilder::prepare_delete_statement(table, &Vec::default());
         assert_eq!(sql, "DELETE FROM test");
     }
 
     #[test]
     fn test_sql_delete_statement_with_filters() {
-        let builder = SqlQueryBuilder {};
-
         let table = "test";
         let columns = vec!["one", "two", "three"];
-        let sql = builder.prepare_delete_statement(table, &columns);
+        let sql = SqlQueryBuilder::prepare_delete_statement(table, &columns);
         assert_eq!(
             sql,
             "DELETE FROM test WHERE one = $1 AND two = $2 AND three = $3"

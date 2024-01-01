@@ -1,5 +1,6 @@
 use clap::Parser;
 use tracing::info;
+use tracing::error;
 
 mod db_client;
 mod settings;
@@ -46,11 +47,12 @@ async fn main() {
         }
         Ok(val) => val,
     };
-    let db = DBClient::new(&settings).await.unwrap();
-    let web_client = WebClient::new(
-        "api.cert.tastyworks.com",
-        "streamer.cert.tastyworks.com",
-        db,
-    )
-    .await;
+    let web_client =
+        match WebClient::new("api.cert.tastyworks.com", "streamer.cert.tastyworks.com").await {
+            Ok(val) => val,
+            Err(err) => {
+                error!("{}", err);
+                std::process::exit(1);
+            }
+        }
 }
