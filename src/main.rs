@@ -1,6 +1,6 @@
 use clap::Parser;
-use tracing::info;
 use tracing::error;
+use tracing::info;
 
 mod db_client;
 mod settings;
@@ -54,5 +54,5 @@ async fn main() {
                 error!("{}", err);
                 std::process::exit(1);
             }
-        }
+        };
 }

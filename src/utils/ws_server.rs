@@ -12,56 +12,56 @@ type Session = ezsockets::Session<SessionID, Message>;
 
 pub struct WsServer {}
 
-#[async_trait]
-impl ezsockets::ServerExt for WsServer {
-    type Session = CounterSession;
-    type Call = ();
+// #[async_trait]
+// impl ezsockets::ServerExt for WsServer {
+//     type Session = CounterSession;
+//     type Call = ();
 
-    async fn on_connect(
-        &mut self,
-        socket: ezsockets::Socket,
-        _request: ezsockets::Request,
-        address: SocketAddr,
-    ) -> Result<Session, Option<CloseFrame>> {
-        let id = address.port();
-        let session = Session::create(
-            |handle| {
-                let counting_task = tokio::spawn({
-                    let session = handle.clone();
-                    async move {
-                        loop {
-                            session.call(Message::Increment).unwrap();
-                            session.call(Message::Share).unwrap();
-                            tokio::time::sleep(INTERVAL).await;
-                        }
-                    }
-                });
-                CounterSession {
-                    id,
-                    handle,
-                    counter: 0,
-                    counting_task,
-                }
-            },
-            id,
-            socket,
-        );
-        Ok(session)
-    }
+//     async fn on_connect(
+//         &mut self,
+//         socket: ezsockets::Socket,
+//         _request: ezsockets::Request,
+//         address: SocketAddr,
+//     ) -> Result<Session, Option<CloseFrame>> {
+//         let id = address.port();
+//         let session = Session::create(
+//             |handle| {
+//                 let counting_task = tokio::spawn({
+//                     let session = handle.clone();
+//                     async move {
+//                         loop {
+//                             session.call(Message::Increment).unwrap();
+//                             session.call(Message::Share).unwrap();
+//                             tokio::time::sleep(INTERVAL).await;
+//                         }
+//                     }
+//                 });
+//                 CounterSession {
+//                     id,
+//                     handle,
+//                     counter: 0,
+//                     counting_task,
+//                 }
+//             },
+//             id,
+//             socket,
+//         );
+//         Ok(session)
+//     }
 
-    async fn on_disconnect(
-        &mut self,
-        _id: <Self::Session as ezsockets::SessionExt>::ID,
-        _reason: Result<Option<CloseFrame>, Error>,
-    ) -> Result<(), Error> {
-        Ok(())
-    }
+//     async fn on_disconnect(
+//         &mut self,
+//         _id: <Self::Session as ezsockets::SessionExt>::ID,
+//         _reason: Result<Option<CloseFrame>, Error>,
+//     ) -> Result<(), Error> {
+//         Ok(())
+//     }
 
-    async fn on_call(&mut self, call: Self::Call) -> Result<(), Error> {
-        let () = call;
-        Ok(())
-    }
-}
+//     async fn on_call(&mut self, call: Self::Call) -> Result<(), Error> {
+//         let () = call;
+//         Ok(())
+//     }
+// }
 
 struct CounterSession {
     handle: Session,
@@ -115,11 +115,11 @@ impl ezsockets::SessionExt for CounterSession {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt::init();
-    let (server, _) = Server::create(|_server| WsServer {});
-    ezsockets::tungstenite::run(server, "127.0.0.1:8080")
-        .await
-        .unwrap();
-}
+// #[tokio::main]
+// async fn main() {
+//     tracing_subscriber::fmt::init();
+//     let (server, _) = Server::create(|_server| WsServer {});
+//     ezsockets::tungstenite::run(server, "127.0.0.1:8080")
+//         .await
+//         .unwrap();
+// }

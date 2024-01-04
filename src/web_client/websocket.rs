@@ -66,7 +66,7 @@ pub struct WebSocketClient {
 impl WebSocketClient {
     pub async fn new(url_str: &str) -> anyhow::Result<Self> {
         // WebSocket server URL
-        let url = Url::parse(url_str)?;
+        let url = Url::parse(&format!("ws://{}", url_str))?;
         let (sender, receiver) = unbounded::<SocketMsg>();
         let client = match Self::subscribe_to_web_stream(url, sender.clone()).await {
             Ok(val) => val,
