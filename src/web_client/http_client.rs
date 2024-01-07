@@ -6,7 +6,6 @@ use reqwest::Client;
 use reqwest::RequestBuilder;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::from_slice as json_from_slice;
 use serde_json::from_str as json_from_str;
 use serde_json::to_string as to_json;
 use tracing::info;
@@ -27,14 +26,12 @@ impl HttpClient {
         }
     }
 
-    // fn build_login_payload(request: RequestBuilder) -> RequestBuilder {}
-
     fn add_custom_headers(session: &str, request: RequestBuilder) -> RequestBuilder {
         request
             .header("product", format!("tasty-options-trader"))
             .header("version", "0.1")
             .header("product", format!("application/json"))
-        // .header("Authorization", session)
+            .header("Authorization", session)
     }
 
     pub async fn get<Payload>(&self, endpoint: &str, session: Option<&String>) -> Result<Payload>

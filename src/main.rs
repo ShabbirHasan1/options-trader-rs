@@ -1,6 +1,10 @@
 use clap::Parser;
+use std::env;
+use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 mod db_client;
 mod settings;
@@ -36,9 +40,29 @@ fn start_logging() {
     tracing::subscriber::set_global_default(subscriber).unwrap();
 }
 
+fn graceful_shutdown(is_graceful_shutdown: &mut bool, shutdown_signal: &CancellationToken) {
+    *is_graceful_shutdown = true;
+    info!("Graceful shutdown initiated");
+    shutdown_signal.cancel();
+}
+
+async fn startup_db() -> DBClient {
+    let config =
+        env::var("OPTIONS_CFG").expect("Failed to get the cfg file from the environment variable.");
+    let settings = Config::read_config_file(&config).expect("Failed to parse config file");
+    match DBClient::new(&settings).await {
+        Err(val) => {
+            info!("Settings file error: {val}");
+            std::process::exit(1);
+        }
+        Ok(val) => val,
+    }
+}
+
 #[tokio::main]
 async fn main() {
     start_logging();
+    info!("___/********Options Trader********\\___");
     let cmdline_args = Args::parse();
     let settings = match Config::read_config_file(cmdline_args.settings.as_str()) {
         Err(val) => {
@@ -47,12 +71,53 @@ async fn main() {
         }
         Ok(val) => val,
     };
-    let web_client =
-        match WebClient::new("api.cert.tastyworks.com", "streamer.cert.tastyworks.com").await {
-            Ok(val) => val,
-            Err(err) => {
-                error!("{}", err);
-                std::process::exit(1);
+    let cancel_token = CancellationToken::new();
+    let mut web_client = match WebClient::new(
+        "api.cert.tastyworks.com",
+        "streamer.cert.tastyworks.com",
+        cancel_token.clone(),
+    )
+    .await
+    {
+        Ok(val) => val,
+        Err(err) => {
+            error!("{}", err);
+            std::process::exit(1);
+        }
+    };
+    let db = startup_db().await;
+    let mut is_graceful_shutdown = false;
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
+    let mut publisher_events = match web_client.startup(settings, &db).await {
+        Err(err) => {
+            error!("Failed to subscribe to account updates, error: {}", err);
+            std::process::exit(1)
+        }
+        Ok(val) => val,
+    };
+    if let Err(err) = web_client.subscribe_to_account_updates().await {
+        error!("Failed to subscribe to account updates, error: {}", err);
+        std::process::exit(1);
+    }
+    loop {
+        tokio::select! {
+            event = publisher_events.recv() => {
             }
-        };
+            _ = cancel_token.cancelled() => {
+                if is_graceful_shutdown {
+                    std::process::exit(0);
+                }
+                else {
+                    warn!("exiting early");
+                    std::process::exit(1)
+                }
+            }
+            _ = sigterm.recv() => {
+                graceful_shutdown(&mut is_graceful_shutdown, &cancel_token);
+            }
+            _ = signal::ctrl_c() => {
+                graceful_shutdown(&mut is_graceful_shutdown, &cancel_token);
+            }
+        }
+    }
 }
