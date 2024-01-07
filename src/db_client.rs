@@ -5,7 +5,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::Pool;
 use sqlx::Postgres;
 use std::env;
-use std::sync::Arc;
+
 use uuid::Uuid;
 
 use super::settings::Settings;

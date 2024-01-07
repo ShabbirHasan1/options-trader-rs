@@ -7,22 +7,26 @@ use async_trait::async_trait;
 // use crossbeam_channel::Sender;
 use ezsockets::Client;
 use ezsockets::ClientConfig;
+use ezsockets::ClientConnectorTokio;
 use ezsockets::ClientExt;
+use rustls::version::TLS12;
+use rustls::ClientConfig as Config;
+use rustls::RootCertStore;
+use rustls::SupportedProtocolVersion;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::to_string as to_json;
+use std::sync::Arc;
 use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::RecvError;
+
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::Sender;
 use tracing::error;
 use tracing::info;
-use tracing::warn;
+
 use url::Url;
 
 use core::result::Result as CoreResult;
-
-use super::tt_api::WsResponse;
 
 // #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 // pub enum SocketMsg {
@@ -125,9 +129,21 @@ impl WebSocketClient {
         // sender: Sender<SocketMsg>,
     ) -> Result<Client<ClientMsgHandler>> {
         let config = ClientConfig::new(url);
+        let protocal_version = vec![&TLS12];
+
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+        let tls_config = Config::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
         let (client, future) =
             ezsockets::connect(move |_client| ClientMsgHandler { sender }, config).await;
 
+        let wrapped_client = tls_config. .connect_async(Arc::new(client.0)).await.unwrap();
+
+        ezsockets::ClientConfig::default();
         tokio::spawn(async move {
             match future.await {
                 CoreResult::Ok(val) => info!("Future exited gracefully, response: {:?}", val),

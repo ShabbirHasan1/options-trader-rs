@@ -101,7 +101,7 @@ async fn main() {
     }
     loop {
         tokio::select! {
-            event = publisher_events.recv() => {
+            _event = publisher_events.recv() => {
             }
             _ = cancel_token.cancelled() => {
                 if is_graceful_shutdown {

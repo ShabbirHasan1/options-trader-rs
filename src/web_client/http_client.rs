@@ -28,9 +28,9 @@ impl HttpClient {
 
     fn add_custom_headers(session: &str, request: RequestBuilder) -> RequestBuilder {
         request
-            .header("product", format!("tasty-options-trader"))
+            .header("product", "tasty-options-trader".to_string())
             .header("version", "0.1")
-            .header("product", format!("application/json"))
+            .header("product", "application/json".to_string())
             .header("Authorization", session)
     }
 

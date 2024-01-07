@@ -1,34 +1,34 @@
 use anyhow::bail;
 use anyhow::Ok;
 use anyhow::Result;
-use clap::builder::ValueParserFactory;
+
 // use crossbeam_channel::Receiver;
 use core::result::Result as CoreResult;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::from_slice as json_from_slice;
-use serde_json::from_str as json_from_str;
-use serde_json::to_string as to_json;
-use serde_json::Error as JsonError;
-use sqlx::postgres::PgArguments;
+
+
+
+
+
 use sqlx::postgres::PgRow;
-use sqlx::query::Query;
+
 use sqlx::FromRow;
-use sqlx::Postgres;
+
 use sqlx::Row;
-use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::Arc;
-use tokio::sync::broadcast;
+
+
+
+
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
-use tokio::sync::Mutex;
+
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-use ezsockets::Server as EzServer;
+
 
 mod http_client;
 mod tt_api;
@@ -75,9 +75,9 @@ impl FromRow<'_, PgRow> for EndPoint {
     }
 }
 
-impl Into<i32> for EndPoint {
-    fn into(self) -> i32 {
-        match self {
+impl From<EndPoint> for i32 {
+    fn from(val: EndPoint) -> Self {
+        match val {
             EndPoint::Sandbox => 1,
             EndPoint::Live => 2,
         }
