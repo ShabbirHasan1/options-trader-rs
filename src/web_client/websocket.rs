@@ -2,6 +2,8 @@ use anyhow::bail;
 use anyhow::Ok;
 use anyhow::Result;
 use async_trait::async_trait;
+use websocket_util::subscribe::Classification;
+use websocket_util::subscribe::Message;
 // use crossbeam_channel::unbounded;
 // use crossbeam_channel::Receiver;
 // use crossbeam_channel::Sender;
@@ -17,6 +19,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::to_string as to_json;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 
 use tokio::sync::broadcast::Receiver;
@@ -66,6 +70,29 @@ impl ClientExt for ClientMsgHandler {
     }
 }
 
+/// A "dummy" message type used for testing.
+#[derive(Debug)]
+pub enum TtMessage {
+    Application(String),
+    Session(String),
+}
+
+impl Message for TtMessage {
+    type UserMessage = String;
+    type ControlMessage = String;
+
+    fn classify(self) -> Classification<Self::UserMessage, Self::ControlMessage> {
+        match &self {
+            TtMessage::Application(x) => Classification::UserMessage(x.to_string()),
+            TtMessage::Session(x) => Classification::ControlMessage(x.to_string()),
+        }
+    }
+
+    fn is_error(user_message: &Self::UserMessage) -> bool {
+        false
+    }
+}
+
 #[derive(Debug)]
 pub struct WebSocketClient {
     client: Client<ClientMsgHandler>,
@@ -83,15 +110,17 @@ impl WebSocketClient {
         let url = Url::parse(url_str)?;
         let (sender, receiver) = broadcast::channel(300);
         // let (sender, receiver) = unbounded::<SocketMsg>();
-        let client = match Self::subscribe_to_web_stream(url, sender.clone()).await {
+
+        let (websocket, reposonse) = match websocket_util::tungstenite::client(url) {
             CoreResult::Ok(val) => val,
-            Err(err) => bail!(
-                "Failed to start webstream for url: {} error: {}",
-                url_str,
-                err,
-            ),
+            Err(err) => bail!("Failed to connect to websocket server, error: {}", err),
         };
-        Ok(Self {
+
+        let wrapped_client = websocket_util::wrap::Wrapper::builder()
+            .set_ping_interval(Some(Duration::from_secs(15)))
+            .build(websocket);
+
+        websocket.Ok(Self {
             client,
             receiver,
             sender,
@@ -116,40 +145,40 @@ impl WebSocketClient {
         }
     }
 
-    pub async fn cancel_stream(&self) {
-        let _ = self.client.close(Some(ezsockets::CloseFrame {
-            code: ezsockets::CloseCode::Normal,
-            reason: String::from("Closing websocket stream"),
-        }));
-    }
+    // pub async fn cancel_stream(&self) {
+    //     let _ = self.client.close(Some(ezsockets::CloseFrame {
+    //         code: ezsockets::CloseCode::Normal,
+    //         reason: String::from("Closing websocket stream"),
+    //     }));
+    // }
 
-    async fn subscribe_to_web_stream(
-        url: Url,
-        sender: Sender<String>,
-        // sender: Sender<SocketMsg>,
-    ) -> Result<Client<ClientMsgHandler>> {
-        let config = ClientConfig::new(url);
-        let protocal_version = vec![&TLS12];
+    // async fn subscribe_to_web_stream(
+    //     url: Url,
+    //     sender: Sender<String>,
+    //     // sender: Sender<SocketMsg>,
+    // ) -> Result<Client<ClientMsgHandler>> {
+    //     let config = ClientConfig::new(url);
+    //     let protocal_version = vec![&TLS12];
 
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    //     let mut root_store = rustls::RootCertStore::empty();
+    //     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-        let tls_config = Config::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+    //     let tls_config = Config::builder()
+    //         .with_root_certificates(root_store)
+    //         .with_no_client_auth();
 
-        let (client, future) =
-            ezsockets::connect(move |_client| ClientMsgHandler { sender }, config).await;
+    //     let (client, future) =
+    //         ezsockets::connect(move |_client| ClientMsgHandler { sender }, config).await;
 
-        let wrapped_client = tls_config. .connect_async(Arc::new(client.0)).await.unwrap();
+    //     let wrapped_client = tls_config.connect_async(Arc::new(client.0)).await.unwrap();
 
-        ezsockets::ClientConfig::default();
-        tokio::spawn(async move {
-            match future.await {
-                CoreResult::Ok(val) => info!("Future exited gracefully, response: {:?}", val),
-                Err(err) => error!("Error thrown from the future, error: {:?}", err),
-            }
-        });
-        Ok(client)
-    }
+    //     ezsockets::ClientConfig::default();
+    //     tokio::spawn(async move {
+    //         match future.await {
+    //             CoreResult::Ok(val) => info!("Future exited gracefully, response: {:?}", val),
+    //             Err(err) => error!("Error thrown from the future, error: {:?}", err),
+    //         }
+    //     });
+    //     Ok(client)
+    // }
 }
