@@ -1,74 +1,35 @@
 use anyhow::bail;
 use anyhow::Ok;
-use anyhow::Result;
-use async_trait::async_trait;
+use tokio_tungstenite::Connector;
+use tokio_tungstenite::MaybeTlsStream;
 use websocket_util::subscribe::Classification;
 use websocket_util::subscribe::Message;
 // use crossbeam_channel::unbounded;
 // use crossbeam_channel::Receiver;
 // use crossbeam_channel::Sender;
-use ezsockets::Client;
-use ezsockets::ClientConfig;
-use ezsockets::ClientConnectorTokio;
-use ezsockets::ClientExt;
-use rustls::version::TLS12;
-use rustls::ClientConfig as Config;
-use rustls::RootCertStore;
-use rustls::SupportedProtocolVersion;
+use native_tls;
+use native_tls::Protocol;
+use native_tls::TlsConnector as NativeTlsConnector;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::to_string as to_json;
+use serde_json::Error as JsonError;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
-
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::Sender;
+use tokio_tungstenite::WebSocketStream;
 use tracing::error;
 use tracing::info;
+use websocket_util::tungstenite::Error as WebSocketError;
+use websocket_util::wrap;
+use websocket_util::wrap::Wrapper;
 
 use url::Url;
 
 use core::result::Result as CoreResult;
-
-// #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-// pub enum SocketMsg {
-//     Response(String),
-// }
-
-#[derive(Debug)]
-struct ClientMsgHandler {
-    // sender: Sender<SocketMsg>,
-    sender: Sender<String>,
-}
-
-#[async_trait]
-impl ClientExt for ClientMsgHandler {
-    type Call = ();
-
-    async fn on_text(&mut self, text: String) -> CoreResult<(), ezsockets::Error> {
-        info!("received message: {text}");
-
-        match self.sender.send(text) {
-            Err(err) => {
-                panic!("Something went wrong, error: {}", err)
-            }
-            _ => CoreResult::Ok(()),
-        }
-        // self.sender.send(SocketMsg::Response(text));
-    }
-
-    async fn on_binary(&mut self, bytes: Vec<u8>) -> CoreResult<(), ezsockets::Error> {
-        info!("received bytes: {bytes:?}");
-        CoreResult::Ok(())
-    }
-
-    async fn on_call(&mut self, call: Self::Call) -> CoreResult<(), ezsockets::Error> {
-        let () = call;
-        CoreResult::Ok(())
-    }
-}
 
 /// A "dummy" message type used for testing.
 #[derive(Debug)]
@@ -95,32 +56,49 @@ impl Message for TtMessage {
 
 #[derive(Debug)]
 pub struct WebSocketClient {
-    client: Client<ClientMsgHandler>,
     // receiver: Receiver<SocketMsg>,
     // sender: Sender<SocketMsg>,
+    client: Wrapper<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     receiver: Receiver<String>,
     sender: Sender<String>,
 }
 
+fn message_parser(
+    result: Result<wrap::Message, WebSocketError>,
+) -> Result<Result<TtMessage, JsonError>, WebSocketError> {
+    result.map(|message| match message {
+        wrap::Message::Text(string) => json_from_str::<TtMessage>(&string),
+        wrap::Message::Binary(data) => json_from_slice::<Vec<DataMessage<B, Q, T>>>(&data),
+    })
+}
+
 impl WebSocketClient {
-    pub async fn new(url_str: &str) -> anyhow::Result<Self> {
+    pub async fn new(url: &str) -> anyhow::Result<Self> {
         // WebSocket server URL
-        info!("Creating websocket with target host: {}", url_str);
+        info!("Creating websocket with target host: {}", url);
 
-        let url = Url::parse(url_str)?;
         let (sender, receiver) = broadcast::channel(300);
-        // let (sender, receiver) = unbounded::<SocketMsg>();
 
-        let (websocket, reposonse) = match websocket_util::tungstenite::client(url) {
-            CoreResult::Ok(val) => val,
-            Err(err) => bail!("Failed to connect to websocket server, error: {}", err),
-        };
+        let tls_connector = NativeTlsConnector::builder()
+            .min_protocol_version(Some(Protocol::Tlsv12))
+            .build()?;
 
-        let wrapped_client = websocket_util::wrap::Wrapper::builder()
+        // let tls_connector = TlsConnector::from(tls_connector);
+        let stream = TcpStream::connect(url).await?;
+        let (stream, _) = tokio_tungstenite::client_async_tls_with_config(
+            url,
+            stream,
+            None,
+            Some(Connector::NativeTls(tls_connector)),
+        )
+        .await?;
+
+        let client = Ok(Wrapper::builder()
             .set_ping_interval(Some(Duration::from_secs(15)))
-            .build(websocket);
+            .build(stream))
+        .map(|m| message_parser(m));
 
-        websocket.Ok(Self {
+        Ok(Self {
             client,
             receiver,
             sender,
