@@ -11,6 +11,7 @@ use serde_json::to_string as to_json;
 use tracing::info;
 use url::Url;
 
+#[derive(Clone, Debug)]
 pub struct HttpClient {
     base_url: String,
     client: Client,

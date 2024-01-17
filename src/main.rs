@@ -88,20 +88,15 @@ async fn main() {
     let db = startup_db().await;
     let mut is_graceful_shutdown = false;
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
-    let mut publisher_events = match web_client.startup(settings, &db).await {
-        Err(err) => {
-            error!("Failed to subscribe to account updates, error: {}", err);
-            std::process::exit(1)
-        }
-        Ok(val) => val,
-    };
-    if let Err(err) = web_client.subscribe_to_account_updates().await {
-        error!("Failed to subscribe to account updates, error: {}", err);
+    let mut receiver = web_client.subscribe_to_events();
+    if let Err(err) = web_client.startup(settings, &db).await {
+        error!("Failed to startup web_client, error: {}, exiting app", err);
         std::process::exit(1);
     }
     loop {
         tokio::select! {
-            _event = publisher_events.recv() => {
+            event = receiver.recv() => {
+                info!("Receieved message from websocket {}", event.unwrap());
             }
             _ = cancel_token.cancelled() => {
                 if is_graceful_shutdown {

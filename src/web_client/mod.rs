@@ -1,34 +1,22 @@
 use anyhow::bail;
 use anyhow::Ok;
 use anyhow::Result;
-
-// use crossbeam_channel::Receiver;
+use chrono::DateTime;
+use chrono::Utc;
 use core::result::Result as CoreResult;
 use serde::Deserialize;
 use serde::Serialize;
-
-
-
-
-
 use sqlx::postgres::PgRow;
-
 use sqlx::FromRow;
-
 use sqlx::Row;
-
-
-
-
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
-
+use tokio::sync::broadcast::Sender;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
-
-
 
 mod http_client;
 mod tt_api;
@@ -39,8 +27,8 @@ use crate::db_client::SqlQueryBuilder;
 use super::db_client::DBClient;
 use super::settings::Settings;
 use http_client::HttpClient;
-// use websocket::SocketMsg;
 use websocket::WebSocketClient;
+// use websocket::SocketMsg;
 
 #[cfg(test)]
 const BASE_URL_UAT: &str = "api.cert.tastyworks.com";
@@ -100,6 +88,8 @@ struct AuthCreds {
     #[serde(rename = "remember-me")]
     #[sqlx(default)]
     remember_me: bool,
+    #[serde(skip)]
+    last: DateTime<Utc>,
 }
 
 impl Default for AuthCreds {
@@ -110,7 +100,8 @@ impl Default for AuthCreds {
             session: String::default(),
             remember: String::default(),
             endpoint: EndPoint::default(),
-            remember_me: true, // Set the default value for remember_me here
+            remember_me: true,
+            last: DateTime::default(),
         }
     }
 }
@@ -143,11 +134,14 @@ struct User {
     external_id: String,
 }
 
+#[derive(Clone, Debug)]
 pub struct WebClient {
     session: String,
     account: String,
     http_client: HttpClient,
-    websocket: WebSocketClient,
+    account_updates: WebSocketClient,
+    // mktdata: WebSocketClient,
+    sender: Sender<String>,
     cancel_token: CancellationToken,
 }
 
@@ -157,16 +151,24 @@ impl WebClient {
         ws_url: &str,
         cancel_token: CancellationToken,
     ) -> Result<Self> {
+        let (sender, _) = broadcast::channel::<String>(300);
+
         Ok(WebClient {
             session: String::default(),
             account: String::default(),
             http_client: HttpClient::new(&format!("https://{}", base_url)),
-            websocket: WebSocketClient::new(&format!("wss://{}", ws_url)).await?,
+            account_updates: WebSocketClient::new(
+                &format!("wss://{}", ws_url),
+                sender.clone(),
+                cancel_token.clone(),
+            )
+            .await?,
+            sender,
             cancel_token,
         })
     }
 
-    pub async fn startup(&mut self, settings: Settings, db: &DBClient) -> Result<Receiver<String>> {
+    pub async fn startup(&mut self, settings: Settings, db: &DBClient) -> Result<()> {
         let creds = Self::fetch_auth_from_db(&settings.username, settings.endpoint, db).await?;
         assert!(creds.len() == 1);
         let data = &creds[0];
@@ -174,7 +176,6 @@ impl WebClient {
         let updates = match Self::refresh_session_token(&self.http_client, data.clone()).await {
             CoreResult::Ok(val) => {
                 Self::update_auth_from_db(
-                    &val.data.user.external_id,
                     &val.data.session,
                     &val.data.remember,
                     settings.endpoint,
@@ -188,15 +189,8 @@ impl WebClient {
 
         self.session = updates.data.session;
         self.account = updates.data.user.external_id;
-        Self::post_office(
-            self.websocket.subscribe_to_events(),
-            self.cancel_token.clone(),
-        );
-        Ok(self.websocket.subscribe_to_events())
-    }
 
-    pub async fn shutdown(&mut self) {
-        self.websocket.cancel_stream().await
+        self.subscribe_to_account_updates().await
     }
 
     async fn fetch_auth_from_db(
@@ -222,19 +216,22 @@ impl WebClient {
     }
 
     async fn update_auth_from_db(
-        account: &str,
         session: &str,
         remember: &str,
         endpoint: EndPoint,
+
         db: &DBClient,
     ) -> Result<()> {
         let stmt = SqlQueryBuilder::prepare_update_statement(
             "tasty_auth",
-            &vec!["account", "session", "remember", "endpoint"],
+            &vec!["session", "remember", "endpoint"],
         );
 
+        info!(
+            "Writing remember token {} to db for statement {}",
+            remember, stmt
+        );
         match sqlx::query(&stmt)
-            .bind(account)
             .bind(session)
             .bind(remember)
             .bind::<i32>(endpoint.into())
@@ -258,21 +255,39 @@ impl WebClient {
         Ok(refresh_token)
     }
 
-    fn subscribe_to_events(self) -> Result<Receiver<String>> {
-        Ok(self.websocket.subscribe_to_events())
+    pub fn subscribe_to_events(&self) -> Receiver<String> {
+        self.sender.subscribe()
     }
 
-    pub async fn subscribe_to_account_updates(&mut self) -> Result<()> {
+    async fn subscribe_to_account_updates(&mut self) -> Result<()> {
+        if let Err(err) = self.account_updates.subscribe_to_events().await {
+            bail!("Failed to subscribe to websocket stream, error: {}", err)
+        }
         let ws_auth = WsConnect {
             action: "connect".to_string(),
-            account_ids: vec![self.account.clone()],
+            account_ids: vec!["5WY06911".to_string()],
             session: self.session.to_string(),
         };
-        match self.websocket.send_message::<WsConnect>(ws_auth).await {
-            Err(err) => bail!("Failed to send messsage on websocket, error: {}", err),
-            _ => Ok(()),
-        }
+        self.account_updates
+            .send_message::<WsConnect>(ws_auth)
+            .await
     }
+
+    // async fn subscribe_to_mktdata(&mut self) -> Result<()> {
+    //     let ws_auth = WsConnect {
+    //         action: "connect".to_string(),
+    //         account_ids: vec![self.account.clone()],
+    //         session: self.session.to_string(),
+    //     };
+    //     match self
+    //         .account_updates
+    //         .send_message::<WsConnect>(ws_auth)
+    //         .await
+    //     {
+    //         Err(err) => bail!("Failed to send messsage on websocket, error: {}", err),
+    //         _ => Ok(()),
+    //     }
+    // }
 
     async fn post_office(mut receiver: Receiver<String>, cancel_token: CancellationToken) {
         tokio::spawn(async move {
@@ -355,7 +370,7 @@ mod tests {
     //     mock.assert();
     // }
 
-    // #[ignore = "live-test"]
+    #[ignore = "live-test"]
     #[tokio::test]
     async fn test_live_refresh_remember_token() {
         // Specify the URL you want to use for testing
@@ -399,7 +414,6 @@ mod tests {
 
             let data = &refreshed.unwrap().data;
             let result = match WebClient::update_auth_from_db(
-                &data.user.external_id,
                 &data.session,
                 &data.remember,
                 settings.endpoint,
@@ -438,8 +452,18 @@ mod tests {
         let settings = Config::read_config_file(&config).expect("Failed to parse config file");
         let db = DBClient::new(&settings).await.unwrap();
 
-        client.startup(settings, &db).await;
-        client.subscribe_to_account_updates().await;
+        let mut receiver = client.subscribe_to_events();
+        let _ = match client.startup(settings, &db).await {
+            CoreResult::Ok(val) => anyhow::Result::Ok(val),
+            Err(err) => {
+                let error = format!("{}", err);
+                anyhow::Result::Err(error)
+            }
+        };
+
+        let message = receiver.blocking_recv();
+        assert!(message.is_ok());
+        let _message = message.unwrap();
 
         sleep(Duration::from_secs(10));
 
