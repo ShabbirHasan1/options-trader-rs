@@ -35,7 +35,7 @@ impl HttpClient {
             .header("Authorization", session)
     }
 
-    pub async fn get<Payload>(&self, endpoint: &str, session: Option<&String>) -> Result<Payload>
+    pub async fn get<Payload>(&self, endpoint: &str, session: Option<&str>) -> Result<Payload>
     where
         Payload: Serialize + for<'a> Deserialize<'a>,
     {
@@ -65,7 +65,7 @@ impl HttpClient {
         &self,
         endpoint: &str,
         data: Payload,
-        session: Option<&String>,
+        session: Option<&str>,
     ) -> Result<Response>
     where
         Payload: Serialize + for<'a> Deserialize<'a>,

@@ -59,6 +59,9 @@ async fn startup_db() -> DBClient {
     }
 }
 
+const BASE_URL_UAT: &str = "api.cert.tastyworks.com";
+const WS_URL_UAT: &str = "streamer.cert.tastyworks.com";
+
 #[tokio::main]
 async fn main() {
     start_logging();
@@ -89,7 +92,7 @@ async fn main() {
     let mut is_graceful_shutdown = false;
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
     let mut receiver = web_client.subscribe_to_events();
-    if let Err(err) = web_client.startup(settings, &db).await {
+    if let Err(err) = web_client.startup(WS_URL_UAT, settings, &db).await {
         error!("Failed to startup web_client, error: {}, exiting app", err);
         std::process::exit(1);
     }

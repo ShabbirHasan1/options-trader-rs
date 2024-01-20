@@ -1,6 +1,6 @@
 [package]
 name = "options-trader"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 author = "chris lawrence"
 about = "options risk management"

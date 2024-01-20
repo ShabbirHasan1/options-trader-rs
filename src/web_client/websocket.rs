@@ -48,49 +48,29 @@ struct Response {
 }
 
 #[derive(Clone, Debug)]
-struct Session {
-    session_id: String,
-    auth_token: String,
-    last: DateTime<Utc>,
-    to_ws: Sender<String>,
-    is_alive: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct WebSocketClient {
-    url: Url,
+pub struct WebSocketClient<Session> {
     session: Arc<RwLock<Session>>,
     to_app: Sender<String>,
     cancel_token: CancellationToken,
 }
 
-impl WebSocketClient {
+impl<Session> WebSocketClient<Session> {
     pub async fn new(
-        url: &str,
-        from_ws: Sender<String>,
+        session: Arc<RwLock<Session>>,
+        to_app: Sender<String>,
         cancel_token: CancellationToken,
     ) -> Result<Self> {
         // WebSocket server URL
         info!("Creating websocket with target host: {}", url);
-        let (to_ws, _) = broadcast::channel::<String>(100);
-        let session = Arc::new(RwLock::new(Session {
-            session_id: String::default(),
-            auth_token: String::default(),
-            last: Utc::now(),
-            to_ws,
-            is_alive: false,
-        }));
-
         Ok(Self {
-            url: Url::parse(url)?,
             session,
-            to_app: from_ws,
+            to_app,
             cancel_token,
         })
     }
 
     pub async fn startup(&mut self, connect: WsConnect) -> anyhow::Result<()> {
-        self.session.write().unwrap().auth_token = connect.auth_token.clone();
+        self.session.write().unwrap().auth_token() = connect.auth_token.clone();
         self.send_message::<WsConnect>(connect).await
     }
 
@@ -104,10 +84,10 @@ impl WebSocketClient {
                 Ok(mut session) => {
                     match response.action.as_str() {
                         "connect" => {
-                            session.session_id = response.websocket_session_id;
-                            session.is_alive = true;
+                            session.session_id() = response.websocket_session_id;
+                            session.is_alive() = true;
                         }
-                        "heartbeat" => session.last = Utc::now(),
+                        "heartbeat" => session.last() = Utc::now(),
                         _ => (),
                     };
                 }
@@ -140,7 +120,7 @@ impl WebSocketClient {
                 };
                 let _ = match serde_json::from_str::<Heartbeat>(&msg) {
                     Ok(response) => {
-                        session.write().unwrap().last = Utc::now();
+                        session.write().unwrap().last() = Utc::now();
                         return;
                     }
                     Err(err) => {
@@ -196,7 +176,7 @@ impl WebSocketClient {
         let from_ws = self.to_app.clone();
         let cancel_token = self.cancel_token.clone();
         let session = Arc::clone(&self.session);
-        let mut to_ws = session.read().unwrap().to_ws.subscribe();
+        let mut to_ws = session.read().unwrap().to_ws().subscribe();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -238,10 +218,10 @@ impl WebSocketClient {
     ) -> bool {
         match session.read() {
             Ok(session) => {
-                if !session.is_alive {
+                if !session.is_alive() {
                     return false;
                 }
-                if session.last + Duration::from_secs(60) < Utc::now() {
+                if session.last() + Duration::from_secs(60) < Utc::now() {
                     error!("Heartbeat response not received in the last minute, forcing a restart");
                     cancel_token.cancel();
                     return false;

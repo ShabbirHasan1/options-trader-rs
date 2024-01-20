@@ -20,6 +20,7 @@ use tracing::info;
 use tracing::warn;
 
 mod http_client;
+mod sessions;
 mod tt_api;
 mod websocket;
 
@@ -28,6 +29,8 @@ use crate::db_client::SqlQueryBuilder;
 use super::db_client::DBClient;
 use super::settings::Settings;
 use http_client::HttpClient;
+use sessions::AccountSession;
+use sessions::MktdataSession;
 use websocket::WebSocketClient;
 // use websocket::SocketMsg;
 
@@ -45,6 +48,18 @@ const WS_URL_UAT: &str = "streamer.cert.tastyworks.com";
 struct RefreshToken {
     data: AuthResponse,
     context: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApiQuoteToken {
+    token: String,
+    #[serde(rename = "streamer-url")]
+    streamer_url: String,
+    #[serde(rename = "websocket-url")]
+    websocket_url: String,
+    #[serde(rename = "dxlink-url")]
+    dxlink_url: String,
+    level: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -138,9 +153,9 @@ pub struct WebClient {
     session: String,
     account: String,
     http_client: HttpClient,
-    account_updates: WebSocketClient,
-    // mktdata: WebSocketClient,
-    sender: Sender<String>,
+    account_updates: Option<WebSocketClient<AccountSession>>,
+    mktdata: Option<WebSocketClient<MktdataSession>>,
+    to_app: Sender<String>,
     cancel_token: CancellationToken,
 }
 
@@ -150,24 +165,25 @@ impl WebClient {
         ws_url: &str,
         cancel_token: CancellationToken,
     ) -> Result<Self> {
-        let (sender, _) = broadcast::channel::<String>(300);
+        let (to_app, _) = broadcast::channel::<String>(100);
 
         Ok(WebClient {
             session: String::default(),
             account: String::default(),
             http_client: HttpClient::new(&format!("https://{}", base_url)),
-            account_updates: WebSocketClient::new(
-                &format!("wss://{}", ws_url),
-                sender.clone(),
-                cancel_token.clone(),
-            )
-            .await?,
-            sender,
+            account_updates: None,
+            mktdata: None,
+            to_app,
             cancel_token,
         })
     }
 
-    pub async fn startup(&mut self, settings: Settings, db: &DBClient) -> Result<()> {
+    pub async fn startup(
+        &mut self,
+        account_session_url: &str,
+        settings: Settings,
+        db: &DBClient,
+    ) -> Result<()> {
         let creds = Self::fetch_auth_from_db(&settings.username, settings.endpoint, db).await?;
         assert!(creds.len() == 1);
         let data = &creds[0];
@@ -186,10 +202,36 @@ impl WebClient {
             Err(err) => bail!("Failed to update refresh token, error: {}", err),
         };
 
+        let (to_ws, _) = broadcast::channel::<String>(100);
+
+        let account_session =
+            AccountSession::new(&format!("wss://{}", account_session_url), to_ws.clone());
+
         self.session = updates.data.session;
         self.account = updates.data.user.external_id;
 
-        self.subscribe_to_account_updates().await
+        let cancel_token = self.cancel_token.clone();
+
+        let api_quote_token = self.get_api_quote_token(&self.http_client, account_session.read().unwrap().get_auth_token()).await?;
+        self.account_updates = Some(
+            WebSocketClient::<AccountSession>::new(
+                account_session,
+                self.to_app.clone(),
+                cancel_token.clone(),
+            )
+            .await?,
+        );
+        self.subscribe_to_account_updates().await?;
+        let mktdata_session = MktdataSession::new(api_quote_token, to_ws);
+        self.mktdata = Some(
+            WebSocketClient::<MktdataSession>::new(
+                mktdata_session,
+                self.to_app.clone(),
+                cancel_token,
+            )
+            .await?,
+        );
+        self.subscribe_to_mktdata().await
     }
 
     async fn fetch_auth_from_db(
@@ -254,12 +296,21 @@ impl WebClient {
         Ok(refresh_token)
     }
 
+    async fn get_api_quote_token(&self,
+        http_client: &HttpClient,
+        auth_token: &str,
+    ) -> Result<ApiQuoteToken> {
+        http_client
+            .get::<ApiQuoteToken>("api-quote-tokens", Some(auth_token))
+            .await
+    }
+
     pub fn subscribe_to_events(&self) -> Receiver<String> {
-        self.sender.subscribe()
+        self.to_app.subscribe()
     }
 
     async fn subscribe_to_account_updates(&mut self) -> Result<()> {
-        if let Err(err) = self.account_updates.subscribe_to_events().await {
+        if let Err(err) = self.account_updates.expect("Account updates not initialised").subscribe_to_events().await {
             bail!("Failed to subscribe to websocket stream, error: {}", err)
         }
         let ws_auth = WsConnect {
@@ -270,21 +321,12 @@ impl WebClient {
         self.account_updates.startup(ws_auth).await
     }
 
-    // async fn subscribe_to_mktdata(&mut self) -> Result<()> {
-    //     let ws_auth = WsConnect {
-    //         action: "connect".to_string(),
-    //         account_ids: vec![self.account.clone()],
-    //         session: self.session.to_string(),
-    //     };
-    //     match self
-    //         .account_updates
-    //         .send_message::<WsConnect>(ws_auth)
-    //         .await
-    //     {
-    //         Err(err) => bail!("Failed to send messsage on websocket, error: {}", err),
-    //         _ => Ok(()),
-    //     }
-    // }
+    async fn subscribe_to_mktdata(&mut self) -> Result<()> {
+        match self.mktdata.expect("Account updates not initialised").send_message::<WsConnect>().await {
+            Err(err) => bail!("Failed to send messsage on websocket, error: {}", err),
+            _ => Ok(()),
+        }
+    }
 
     async fn post_office(mut receiver: Receiver<String>, cancel_token: CancellationToken) {
         tokio::spawn(async move {
@@ -332,40 +374,40 @@ mod tests {
     use std::time::Duration;
     use std::{thread, time};
 
-    // #[derive(Debug, Serialize, Deserialize)]
-    // struct AuthResponse {
-    //     rememberme: String,
-    //     session_id: String,
-    // }
+    #[derive(Debug, Serialize, Deserialize)]
+    struct AuthResponse {
+        rememberme: String,
+        session_id: String,
+    }
 
-    // #[tokio::test]
-    // async fn test_refresh_session_token() {
-    //     let mut server = Server::new();
-    //     let url = server.url();
-    //     let auth_creds = &auth_token_response();
-    //     let client = WebClient::new(&url, &WS_URL_UAT).await;
-    //     assert!(client.is_ok());
-    //     let client = client.unwrap();
+    #[tokio::test]
+    async fn test_refresh_session_token() {
+        let mut server = Server::new();
+        let url = server.url();
+        let auth_creds = &auth_token_response();
+        let client = WebClient::new(&url, &WS_URL_UAT).await;
+        assert!(client.is_ok());
+        let client = client.unwrap();
 
-    //     let response = AuthResponse {
-    //         rememberme: "905802385048509348503985".to_string(),
-    //         session_id: "098573495709283498724359872".to_string(),
-    //     };
+        let response = AuthResponse {
+            rememberme: "905802385048509348503985".to_string(),
+            session_id: "098573495709283498724359872".to_string(),
+        };
 
-    //     // Create a mock
-    //     let mock = server
-    //         .mock("POST", "/sessions")
-    //         .match_header("content-type", "application/json")
-    //         .match_body(Matcher::JsonString(to_json(&auth_creds).unwrap()))
-    //         .with_status(201)
-    //         .with_header("content-type", "application/json")
-    //         .with_body(to_json(&response).unwrap())
-    //         .create();
+        // Create a mock
+        let mock = server
+            .mock("POST", "/sessions")
+            .match_header("content-type", "application/json")
+            .match_body(Matcher::JsonString(to_json(&auth_creds).unwrap()))
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(to_json(&response).unwrap())
+            .create();
 
-    //     let client = WebClient::refresh_session_token(&client.http_client, auth_creds).await;
-    //     assert!(client.is_ok());
-    //     mock.assert();
-    // }
+        let client = WebClient::refresh_session_token(&client.http_client, auth_creds).await;
+        assert!(client.is_ok());
+        mock.assert();
+    }
 
     #[ignore = "live-test"]
     #[tokio::test]
@@ -434,36 +476,5 @@ mod tests {
         let first = stored_auths.clone().0;
         let second = stored_auths.clone().1;
         assert!(first.ne(&second));
-    }
-
-    // #[ignore = "live-test"]
-    #[tokio::test]
-    async fn test_live_download_account_details() {
-        let cancel_token = CancellationToken::new();
-        let mut client = WebClient::new(&BASE_URL_UAT, &WS_URL_UAT, cancel_token.clone())
-            .await
-            .unwrap();
-
-        let config = env::var("OPTIONS_CFG")
-            .expect("Failed to get the cfg file from the environment variable.");
-        let settings = Config::read_config_file(&config).expect("Failed to parse config file");
-        let db = DBClient::new(&settings).await.unwrap();
-
-        let mut receiver = client.subscribe_to_events();
-        let _ = match client.startup(settings, &db).await {
-            CoreResult::Ok(val) => anyhow::Result::Ok(val),
-            Err(err) => {
-                let error = format!("{}", err);
-                anyhow::Result::Err(error)
-            }
-        };
-
-        let message = receiver.blocking_recv();
-        assert!(message.is_ok());
-        let _message = message.unwrap();
-
-        sleep(Duration::from_secs(10));
-
-        cancel_token.cancel();
     }
 }
