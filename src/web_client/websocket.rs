@@ -11,41 +11,46 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::from_str as json_from_str;
 use serde_json::to_string as to_json;
-use std::ops::Deref;
-use std::ops::DerefMut;
 use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender;
-use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio::time::Duration;
 use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
 use url::Url;
 
+use super::WsConnect;
+
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct Heartbeat {
     action: String,
-    session_id: String,
+    #[serde(rename = "auth-token")]
+    auth_token: String,
 }
 
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
-struct AuthResponse {
+#[derive(Clone, Default, Debug, Deserialize)]
+struct Response {
     status: String,
     action: String,
+    #[serde(rename = "web-socket-session-id")]
     websocket_session_id: String,
-    value: String,
-    request_id: String,
+    value: Option<Vec<String>>,
+    #[serde(rename = "request-id")]
+    request_id: u8,
 }
 
 #[derive(Clone, Debug)]
 struct Session {
     session_id: String,
+    auth_token: String,
     last: DateTime<Utc>,
     to_ws: Sender<String>,
     is_alive: bool,
@@ -54,8 +59,8 @@ struct Session {
 #[derive(Clone, Debug)]
 pub struct WebSocketClient {
     url: Url,
-    session: Arc<Session>,
-    from_ws: Sender<String>,
+    session: Arc<RwLock<Session>>,
+    to_app: Sender<String>,
     cancel_token: CancellationToken,
 }
 
@@ -68,47 +73,82 @@ impl WebSocketClient {
         // WebSocket server URL
         info!("Creating websocket with target host: {}", url);
         let (to_ws, _) = broadcast::channel::<String>(100);
-        let session = Arc::new(Session {
+        let session = Arc::new(RwLock::new(Session {
             session_id: String::default(),
+            auth_token: String::default(),
             last: Utc::now(),
             to_ws,
             is_alive: false,
-        });
+        }));
 
         Ok(Self {
             url: Url::parse(url)?,
             session,
-            from_ws,
+            to_app: from_ws,
             cancel_token,
         })
+    }
+
+    pub async fn startup(&mut self, connect: WsConnect) -> anyhow::Result<()> {
+        self.session.write().unwrap().auth_token = connect.auth_token.clone();
+        self.send_message::<WsConnect>(connect).await
+    }
+
+    fn handle_response(
+        response: Response,
+        session: &Arc<RwLock<Session>>,
+        cancel_token: &CancellationToken,
+    ) {
+        if response.status.eq("ok") {
+            match session.write() {
+                Ok(mut session) => {
+                    match response.action.as_str() {
+                        "connect" => {
+                            session.session_id = response.websocket_session_id;
+                            session.is_alive = true;
+                        }
+                        "heartbeat" => session.last = Utc::now(),
+                        _ => (),
+                    };
+                }
+                Err(err) => {
+                    error!("Unable to write to session, error: {}", err);
+                    cancel_token.cancel();
+                }
+            }
+        } else {
+            error!(
+                "Failed to connect to stream, action: {}, status: {}",
+                response.action, response.status
+            );
+            cancel_token.cancel()
+        }
     }
 
     fn handle_socket_messages(
         message: Option<Result<Message, WebSocketError>>,
         from_ws: &Sender<String>,
-        session: &mut Arc<Session>,
+        session: &Arc<RwLock<Session>>,
         cancel_token: &CancellationToken,
     ) {
-        match message {
+        let _ = match message {
             Some(CoreResult::Ok(Message::Text(msg))) => {
-                let _ = match serde_json::from_str::<AuthResponse>(&msg) {
+                info!("Receiving message {}", msg);
+                if let Ok(response) = serde_json::from_str::<Response>(&msg) {
+                    Self::handle_response(response, session, cancel_token);
+                    return;
+                };
+                let _ = match serde_json::from_str::<Heartbeat>(&msg) {
                     Ok(response) => {
-                        if response.action.eq("connect") && response.status.eq("ok") {
-                            session.session_id = response.websocket_session_id;
-                            session.is_alive = true;
-                        } else {
-                            error!(
-                                "Failed to connect to stream, action: {}, status: {}",
-                                response.action, response.status
-                            );
-                            cancel_token.cancel()
-                        }
+                        session.write().unwrap().last = Utc::now();
                         return;
                     }
-                    _ => (),
+                    Err(err) => {
+                        error!("Error received deserialising message, error: {}", err);
+                    }
                 };
                 info!("Message received on websocket channel, msg: {:?}", msg);
-                let _ = from_ws.send(msg);
+                // let _ = from_ws.send(msg);
             }
             Some(CoreResult::Ok(Message::Pong(msg))) => {
                 info!("Message received on websocket channel, msg: {:?}", msg);
@@ -142,7 +182,7 @@ impl WebSocketClient {
             .build()
             .expect("Failed to build tlsconnector");
 
-        let (stream, _response) = tokio_tungstenite::connect_async_tls_with_config(
+        let (stream, response) = tokio_tungstenite::connect_async_tls_with_config(
             &self.url,
             None,
             false,
@@ -150,19 +190,21 @@ impl WebSocketClient {
         )
         .await?;
 
+        dbg!("Websocket connect response: {:?}", response);
+
         let (mut write, mut read) = stream.split();
-        let from_ws = self.from_ws.clone();
+        let from_ws = self.to_app.clone();
         let cancel_token = self.cancel_token.clone();
-        let session = Arc::clone(&mut self.session);
+        let session = Arc::clone(&self.session);
+        let mut to_ws = session.read().unwrap().to_ws.subscribe();
         tokio::spawn(async move {
-            let read_ws = from_ws.subscribe();
-            let mut to_ws = session.to_ws.subscribe();
             loop {
                 tokio::select! {
                     msg = read.next() => {
                         Self::handle_socket_messages(msg, &from_ws, &session, &cancel_token);
                     }
                     msg = to_ws.recv() => {
+                        info!("Sending to ws {:?}", msg);
                         match msg {
                             Err(RecvError::Lagged(err)) => warn!("Publisher channel skipping a number of messages: {}", err),
                             Err(RecvError::Closed) => {
@@ -170,13 +212,14 @@ impl WebSocketClient {
                                 cancel_token.cancel();
                             }
                             std::result::Result::Ok(val) => {
+                                debug!("Sending payload {}", val);
                                 let _ = write.send(Message::Text(val)).await;
                             }
                         };
                     }
                     _ = sleep(Duration::from_secs(30)) => {
                         if Self::should_send_heartbeat(&session, &cancel_token) {
-                            let heartbeat = Heartbeat{action: "heartbeat".to_string(), session_id: session.session_id.clone() };
+                            let heartbeat = Heartbeat{action: "heartbeat".to_string(), auth_token: session.read().unwrap().auth_token.clone() };
                             let _ = write.send(Message::Text(to_json(&heartbeat).unwrap())).await;
                         }
                     }
@@ -189,16 +232,28 @@ impl WebSocketClient {
         Ok(())
     }
 
-    fn should_send_heartbeat(session: &Arc<Session>, cancel_token: &CancellationToken) -> bool {
-        if !session.is_alive {
-            return false;
+    fn should_send_heartbeat(
+        session: &Arc<RwLock<Session>>,
+        cancel_token: &CancellationToken,
+    ) -> bool {
+        match session.read() {
+            Ok(session) => {
+                if !session.is_alive {
+                    return false;
+                }
+                if session.last + Duration::from_secs(60) < Utc::now() {
+                    error!("Heartbeat response not received in the last minute, forcing a restart");
+                    cancel_token.cancel();
+                    return false;
+                }
+                true
+            }
+            Err(err) => {
+                error!("Unable to write to session, error: {}", err);
+                cancel_token.cancel();
+                false
+            }
         }
-        if session.last + Duration::from_secs(60) < Utc::now() {
-            error!("Heartbeat response not received in the last minute, forcing a restart");
-            cancel_token.cancel();
-            return false;
-        }
-        return true;
     }
 
     pub async fn send_message<Payload>(&mut self, payload: Payload) -> anyhow::Result<()>
@@ -207,7 +262,7 @@ impl WebSocketClient {
     {
         let output = format!("to websocket sending payload: {}", to_json(&payload)?);
         info!("Sending to websocket: {}", output);
-        match self.session.to_ws.send(to_json(&payload)?) {
+        match self.session.read().unwrap().to_ws.send(to_json(&payload)?) {
             Err(err) => anyhow::bail!("Error sending payload to websocket stream, error: {}", err),
             _ => anyhow::Ok(()),
         }

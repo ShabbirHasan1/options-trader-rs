@@ -14,6 +14,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::Sender;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -121,9 +122,7 @@ struct WsConnect {
     #[serde(rename = "value")]
     account_ids: Vec<String>,
     #[serde(rename = "auth-token")]
-    session: String,
-    // #[serde(rename = "request-id")]
-    // request_id: i32,
+    pub auth_token: String,
 }
 
 #[derive(FromRow, Clone, Default, Debug, Serialize, Deserialize)]
@@ -227,7 +226,7 @@ impl WebClient {
             &vec!["session", "remember", "endpoint"],
         );
 
-        info!(
+        debug!(
             "Writing remember token {} to db for statement {}",
             remember, stmt
         );
@@ -266,11 +265,9 @@ impl WebClient {
         let ws_auth = WsConnect {
             action: "connect".to_string(),
             account_ids: vec!["5WY06911".to_string()],
-            session: self.session.to_string(),
+            auth_token: self.session.to_string(),
         };
-        self.account_updates
-            .send_message::<WsConnect>(ws_auth)
-            .await
+        self.account_updates.startup(ws_auth).await
     }
 
     // async fn subscribe_to_mktdata(&mut self) -> Result<()> {
