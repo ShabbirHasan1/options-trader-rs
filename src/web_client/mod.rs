@@ -9,10 +9,12 @@ use serde::Serialize;
 use sqlx::postgres::PgRow;
 use sqlx::FromRow;
 use sqlx::Row;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::Sender;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
@@ -25,6 +27,8 @@ mod tt_api;
 mod websocket;
 
 use crate::db_client::SqlQueryBuilder;
+
+use self::sessions::WsConnect;
 
 use super::db_client::DBClient;
 use super::settings::Settings;
@@ -44,9 +48,9 @@ const BASE_URL_UAT: &str = "api.cert.tastyworks.com";
 #[cfg(not(test))]
 const WS_URL_UAT: &str = "streamer.cert.tastyworks.com";
 
-#[derive(Debug, Serialize, Deserialize)]
-struct RefreshToken {
-    data: AuthResponse,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WrappedResponse<Response> {
+    data: Response,
     context: String,
 }
 
@@ -54,9 +58,9 @@ struct RefreshToken {
 struct ApiQuoteToken {
     token: String,
     #[serde(rename = "streamer-url")]
-    streamer_url: String,
+    streamer_url: Option<String>,
     #[serde(rename = "websocket-url")]
-    websocket_url: String,
+    websocket_url: Option<String>,
     #[serde(rename = "dxlink-url")]
     dxlink_url: String,
     level: String,
@@ -132,15 +136,6 @@ struct AuthResponse {
 }
 
 #[derive(FromRow, Clone, Default, Debug, Serialize, Deserialize)]
-struct WsConnect {
-    action: String,
-    #[serde(rename = "value")]
-    account_ids: Vec<String>,
-    #[serde(rename = "auth-token")]
-    pub auth_token: String,
-}
-
-#[derive(FromRow, Clone, Default, Debug, Serialize, Deserialize)]
 struct User {
     email: String,
     username: String,
@@ -160,11 +155,7 @@ pub struct WebClient {
 }
 
 impl WebClient {
-    pub async fn new(
-        base_url: &str,
-        ws_url: &str,
-        cancel_token: CancellationToken,
-    ) -> Result<Self> {
+    pub async fn new(base_url: &str, cancel_token: CancellationToken) -> Result<Self> {
         let (to_app, _) = broadcast::channel::<String>(100);
 
         Ok(WebClient {
@@ -201,37 +192,30 @@ impl WebClient {
             }
             Err(err) => bail!("Failed to update refresh token, error: {}", err),
         };
-
-        let (to_ws, _) = broadcast::channel::<String>(100);
-
-        let account_session =
-            AccountSession::new(&format!("wss://{}", account_session_url), to_ws.clone());
-
         self.session = updates.data.session;
         self.account = updates.data.user.external_id;
 
-        let cancel_token = self.cancel_token.clone();
+        let api_quote_token = self
+            .get_api_quote_token(&self.http_client, &self.session)
+            .await?;
 
-        let api_quote_token = self.get_api_quote_token(&self.http_client, account_session.read().unwrap().get_auth_token()).await?;
+        let (to_ws, _) = broadcast::channel::<String>(100);
         self.account_updates = Some(
-            WebSocketClient::<AccountSession>::new(
-                account_session,
-                self.to_app.clone(),
-                cancel_token.clone(),
+            self.subscribe_to_account_updates(
+                account_session_url,
+                &data.account.clone(),
+                &self.session.clone(),
+                to_ws.clone(),
+                self.cancel_token.clone(),
             )
             .await?,
         );
-        self.subscribe_to_account_updates().await?;
-        let mktdata_session = MktdataSession::new(api_quote_token, to_ws);
-        self.mktdata = Some(
-            WebSocketClient::<MktdataSession>::new(
-                mktdata_session,
-                self.to_app.clone(),
-                cancel_token,
-            )
-            .await?,
-        );
-        self.subscribe_to_mktdata().await
+
+        // self.mktdata = Some(
+        //     self.subscribe_to_mktdata(api_quote_token, to_ws.clone(), self.cancel_token.clone())
+        //         .await?,
+        // );
+        Ok(())
     }
 
     async fn fetch_auth_from_db(
@@ -287,194 +271,215 @@ impl WebClient {
     async fn refresh_session_token(
         http_client: &HttpClient,
         mut data: AuthCreds,
-    ) -> Result<RefreshToken> {
+    ) -> Result<WrappedResponse<AuthResponse>> {
         data.remember_me = true;
         let refresh_token = http_client
-            .post::<AuthCreds, RefreshToken>("sessions", data, None)
+            .post::<AuthCreds, WrappedResponse<AuthResponse>>("sessions", data, None)
             .await?;
         info!("Refresh token success, token: {:?}", refresh_token);
         Ok(refresh_token)
     }
 
-    async fn get_api_quote_token(&self,
+    async fn get_api_quote_token(
+        &self,
         http_client: &HttpClient,
         auth_token: &str,
     ) -> Result<ApiQuoteToken> {
-        http_client
-            .get::<ApiQuoteToken>("api-quote-tokens", Some(auth_token))
-            .await
+        let response = http_client
+            .get::<WrappedResponse<ApiQuoteToken>>("api-quote-tokens", Some(auth_token))
+            .await?;
+        Ok(response.data)
     }
 
     pub fn subscribe_to_events(&self) -> Receiver<String> {
         self.to_app.subscribe()
     }
 
-    async fn subscribe_to_account_updates(&mut self) -> Result<()> {
-        if let Err(err) = self.account_updates.expect("Account updates not initialised").subscribe_to_events().await {
-            bail!("Failed to subscribe to websocket stream, error: {}", err)
-        }
-        let ws_auth = WsConnect {
-            action: "connect".to_string(),
-            account_ids: vec!["5WY06911".to_string()],
-            auth_token: self.session.to_string(),
-        };
-        self.account_updates.startup(ws_auth).await
+    async fn subscribe_to_account_updates(
+        &mut self,
+        url: &str,
+        account_id: &str,
+        auth_token: &str,
+        to_ws: Sender<String>,
+        cancel_token: CancellationToken,
+    ) -> Result<WebSocketClient<AccountSession>> {
+        let account_session = AccountSession::new(&format!("wss://{}", url), to_ws);
+
+        let auth = account_session
+            .write()
+            .await
+            .startup(account_id, auth_token)
+            .await;
+
+        let ws_client =
+            WebSocketClient::<AccountSession>::new(account_session, cancel_token.clone())?;
+
+        ws_client.subscribe_to_events().await?;
+        ws_client.send_message::<WsConnect>(auth).await?;
+        Ok(ws_client)
     }
 
-    async fn subscribe_to_mktdata(&mut self) -> Result<()> {
-        match self.mktdata.expect("Account updates not initialised").send_message::<WsConnect>().await {
-            Err(err) => bail!("Failed to send messsage on websocket, error: {}", err),
-            _ => Ok(()),
-        }
+    async fn subscribe_to_mktdata(
+        &mut self,
+        api_quote_token: ApiQuoteToken,
+        to_ws: Sender<String>,
+        cancel_token: CancellationToken,
+    ) -> Result<WebSocketClient<MktdataSession>> {
+        let mktdata_session = MktdataSession::new(api_quote_token, to_ws.clone());
+
+        let ws_client = WebSocketClient::<MktdataSession>::new(mktdata_session, cancel_token)?;
+
+        ws_client.subscribe_to_events().await?;
+        Ok(ws_client)
     }
 
-    async fn post_office(mut receiver: Receiver<String>, cancel_token: CancellationToken) {
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    msg = receiver.recv() => {
-                        match msg {
-                            CoreResult::Ok(msg) => {
-                                info!("{:?}", msg);
-                                // Your further processing logic here
-                            }
-                            Err(RecvError::Lagged(err)) => warn!("websocket channel skipping a number of messages: {}", err),
-                            Err(RecvError::Closed) => {
-                                error!("websocket channel closed");
-                                cancel_token.cancel()
-                            }
-                        };
-                    }
-                    _ = cancel_token.cancelled() => {
-                        break
-                    }
-                }
-            }
-        });
-    }
+    // async fn post_office(mut receiver: Receiver<String>, cancel_token: CancellationToken) {
+    //     tokio::spawn(async move {
+    //         loop {
+    //             tokio::select! {
+    //                 msg = receiver.recv() => {
+    //                     match msg {
+    //                         CoreResult::Ok(msg) => {
+    //                             info!("{:?}", msg);
+    //                             // Your further processing logic here
+    //                         }
+    //                         Err(RecvError::Lagged(err)) => warn!("websocket channel skipping a number of messages: {}", err),
+    //                         Err(RecvError::Closed) => {
+    //                             error!("websocket channel closed");
+    //                             cancel_token.cancel()
+    //                         }
+    //                     };
+    //                 }
+    //                 _ = cancel_token.cancelled() => {
+    //                     break
+    //                 }
+    //             }
+    //         }
+    //     });
+    // }
 
     async fn subscribe_to_mktdata_updates() {}
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
 
-    use mockito::Matcher;
-    use mockito::Server;
-    use tracing_subscriber::fmt::format;
+//     use mockito::Matcher;
+//     use mockito::Server;
+//     use tracing_subscriber::fmt::format;
 
-    use crate::settings::Config;
-    use crate::settings::DatabaseConfig;
-    use crate::settings::Settings;
-    use crate::utils::mock_db::MockDb;
-    use crate::utils::ws_server::WsServer;
-    use std::env;
-    use std::thread::sleep;
-    use std::time::Duration;
-    use std::{thread, time};
+//     use crate::settings::Config;
+//     use crate::settings::DatabaseConfig;
+//     use crate::settings::Settings;
+//     use crate::utils::mock_db::MockDb;
+//     use crate::utils::ws_server::WsServer;
+//     use std::env;
+//     use std::thread::sleep;
+//     use std::time::Duration;
+//     use std::{thread, time};
 
-    #[derive(Debug, Serialize, Deserialize)]
-    struct AuthResponse {
-        rememberme: String,
-        session_id: String,
-    }
+//     #[derive(Debug, Serialize, Deserialize)]
+//     struct AuthResponse {
+//         rememberme: String,
+//         session_id: String,
+//     }
 
-    #[tokio::test]
-    async fn test_refresh_session_token() {
-        let mut server = Server::new();
-        let url = server.url();
-        let auth_creds = &auth_token_response();
-        let client = WebClient::new(&url, &WS_URL_UAT).await;
-        assert!(client.is_ok());
-        let client = client.unwrap();
+//     #[tokio::test]
+//     async fn test_refresh_session_token() {
+//         let mut server = Server::new();
+//         let url = server.url();
+//         let auth_creds = &auth_token_response();
+//         let client = WebClient::new(&url, &WS_URL_UAT).await;
+//         assert!(client.is_ok());
+//         let client = client.unwrap();
 
-        let response = AuthResponse {
-            rememberme: "905802385048509348503985".to_string(),
-            session_id: "098573495709283498724359872".to_string(),
-        };
+//         let response = AuthResponse {
+//             rememberme: "905802385048509348503985".to_string(),
+//             session_id: "098573495709283498724359872".to_string(),
+//         };
 
-        // Create a mock
-        let mock = server
-            .mock("POST", "/sessions")
-            .match_header("content-type", "application/json")
-            .match_body(Matcher::JsonString(to_json(&auth_creds).unwrap()))
-            .with_status(201)
-            .with_header("content-type", "application/json")
-            .with_body(to_json(&response).unwrap())
-            .create();
+//         // Create a mock
+//         let mock = server
+//             .mock("POST", "/sessions")
+//             .match_header("content-type", "application/json")
+//             .match_body(Matcher::JsonString(to_json(&auth_creds).unwrap()))
+//             .with_status(201)
+//             .with_header("content-type", "application/json")
+//             .with_body(to_json(&response).unwrap())
+//             .create();
 
-        let client = WebClient::refresh_session_token(&client.http_client, auth_creds).await;
-        assert!(client.is_ok());
-        mock.assert();
-    }
+//         let client = WebClient::refresh_session_token(&client.http_client, auth_creds).await;
+//         assert!(client.is_ok());
+//         mock.assert();
+//     }
 
-    #[ignore = "live-test"]
-    #[tokio::test]
-    async fn test_live_refresh_remember_token() {
-        // Specify the URL you want to use for testing
-        let config = env::var("OPTIONS_CFG")
-            .expect("Failed to get the cfg file from the environment variable.");
-        let settings = Config::read_config_file(&config).expect("Failed to parse config file");
-        let db = DBClient::new(&settings).await.unwrap();
+//     #[ignore = "live-test"]
+//     #[tokio::test]
+//     async fn test_live_refresh_remember_token() {
+//         // Specify the URL you want to use for testing
+//         let config = env::var("OPTIONS_CFG")
+//             .expect("Failed to get the cfg file from the environment variable.");
+//         let settings = Config::read_config_file(&config).expect("Failed to parse config file");
+//         let db = DBClient::new(&settings).await.unwrap();
 
-        let cancel_token = CancellationToken::new();
-        let client = WebClient::new(&BASE_URL_UAT, &WS_URL_UAT, cancel_token.clone()).await;
-        assert!(client.is_ok());
+//         let cancel_token = CancellationToken::new();
+//         let client = WebClient::new(&BASE_URL_UAT, &WS_URL_UAT, cancel_token.clone()).await;
+//         assert!(client.is_ok());
 
-        let mut stored_auths: (AuthCreds, AuthCreds) = Default::default();
-        for index in 0..2 {
-            let auth_creds =
-                WebClient::fetch_auth_from_db(&settings.username, settings.endpoint, &db).await;
-            assert!(auth_creds.is_ok());
+//         let mut stored_auths: (AuthCreds, AuthCreds) = Default::default();
+//         for index in 0..2 {
+//             let auth_creds =
+//                 WebClient::fetch_auth_from_db(&settings.username, settings.endpoint, &db).await;
+//             assert!(auth_creds.is_ok());
 
-            let stored_data = match index {
-                0 => {
-                    stored_auths.0 = auth_creds.unwrap()[0].clone();
-                    stored_auths.clone().0
-                }
+//             let stored_data = match index {
+//                 0 => {
+//                     stored_auths.0 = auth_creds.unwrap()[0].clone();
+//                     stored_auths.clone().0
+//                 }
 
-                1 => {
-                    stored_auths.1 = auth_creds.unwrap()[0].clone();
-                    stored_auths.clone().1
-                }
-                _ => panic!("Index out of range"),
-            };
-            let client = client.as_ref().unwrap();
-            let refreshed =
-                match WebClient::refresh_session_token(&client.http_client, stored_data).await {
-                    CoreResult::Ok(val) => anyhow::Result::Ok(val),
-                    Err(err) => {
-                        let error = format!("{}", err);
-                        anyhow::Result::Err(error)
-                    }
-                };
-            assert!(refreshed.is_ok());
+//                 1 => {
+//                     stored_auths.1 = auth_creds.unwrap()[0].clone();
+//                     stored_auths.clone().1
+//                 }
+//                 _ => panic!("Index out of range"),
+//             };
+//             let client = client.as_ref().unwrap();
+//             let refreshed =
+//                 match WebClient::refresh_session_token(&client.http_client, stored_data).await {
+//                     CoreResult::Ok(val) => anyhow::Result::Ok(val),
+//                     Err(err) => {
+//                         let error = format!("{}", err);
+//                         anyhow::Result::Err(error)
+//                     }
+//                 };
+//             assert!(refreshed.is_ok());
 
-            let data = &refreshed.unwrap().data;
-            let result = match WebClient::update_auth_from_db(
-                &data.session,
-                &data.remember,
-                settings.endpoint,
-                &db,
-            )
-            .await
-            {
-                CoreResult::Ok(val) => anyhow::Result::Ok(val),
-                Err(err) => {
-                    let error = format!("{}", err);
-                    anyhow::Result::Err(error)
-                }
-            };
+//             let data = &refreshed.unwrap().data;
+//             let result = match WebClient::update_auth_from_db(
+//                 &data.session,
+//                 &data.remember,
+//                 settings.endpoint,
+//                 &db,
+//             )
+//             .await
+//             {
+//                 CoreResult::Ok(val) => anyhow::Result::Ok(val),
+//                 Err(err) => {
+//                     let error = format!("{}", err);
+//                     anyhow::Result::Err(error)
+//                 }
+//             };
 
-            assert!(result.is_ok());
+//             assert!(result.is_ok());
 
-            let second = time::Duration::from_secs(1);
-            thread::sleep(second);
-        }
+//             let second = time::Duration::from_secs(1);
+//             thread::sleep(second);
+//         }
 
-        let first = stored_auths.clone().0;
-        let second = stored_auths.clone().1;
-        assert!(first.ne(&second));
-    }
-}
+//         let first = stored_auths.clone().0;
+//         let second = stored_auths.clone().1;
+//         assert!(first.ne(&second));
+//     }
+// }

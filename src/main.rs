@@ -75,12 +75,7 @@ async fn main() {
         Ok(val) => val,
     };
     let cancel_token = CancellationToken::new();
-    let mut web_client = match WebClient::new(
-        "api.cert.tastyworks.com",
-        "streamer.cert.tastyworks.com",
-        cancel_token.clone(),
-    )
-    .await
+    let mut web_client = match WebClient::new("api.cert.tastyworks.com", cancel_token.clone()).await
     {
         Ok(val) => val,
         Err(err) => {

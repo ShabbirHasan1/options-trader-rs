@@ -15,7 +15,6 @@ use url::Url;
 pub struct HttpClient {
     base_url: String,
     client: Client,
-    session: Option<String>,
 }
 
 impl HttpClient {
@@ -23,7 +22,6 @@ impl HttpClient {
         Self {
             base_url: base_url.to_string(),
             client: Client::new(),
-            session: None,
         }
     }
 
@@ -54,7 +52,7 @@ impl HttpClient {
                 info!("POST Response body: {}", body);
                 match json_from_str::<Payload>(&body) {
                     CoreResult::Ok(val) => Ok(val),
-                    Err(err) => bail!("Failed to parse json on get request, error: {}", err),
+                    Err(err) => bail!("Failed to parse json on get response, error: {}", err),
                 }
             }
             None => bail!("No session token"),
