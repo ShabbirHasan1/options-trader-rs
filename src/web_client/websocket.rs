@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::to_string as to_json;
 use std::sync::Arc;
+use std::sync::RwLockWriteGuard;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
@@ -42,14 +43,15 @@ impl<Session> WebSocketClient<Session> {
     async fn handle_socket_messages(
         message: Option<Result<Message, WebSocketError>>,
         session: Arc<RwLock<Session>>,
-        cancel_token: &CancellationToken,
+        cancel_token: CancellationToken,
     ) where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
         let _ = match message {
             Some(CoreResult::Ok(Message::Text(response))) => {
                 info!("Receiving message {:?}", response);
-                Session::handle_response(response, session, cancel_token).await;
+                let mut session = session.write().await;
+                Session::handle_response(response, &mut session, cancel_token);
                 // let _ = from_ws.send(msg);
             }
             Some(CoreResult::Ok(Message::Pong(msg))) => {
@@ -106,7 +108,7 @@ impl<Session> WebSocketClient<Session> {
             loop {
                 tokio::select! {
                     msg = read.next() => {
-                        Self::handle_socket_messages(msg, session.clone(), &cancel_token).await;
+                        Self::handle_socket_messages(msg, session.clone(), cancel_token.clone()).await;
                     }
                     msg = to_ws.recv() => {
                         info!("Sending to ws {:?}", msg);

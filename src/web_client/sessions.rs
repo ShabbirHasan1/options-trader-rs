@@ -10,6 +10,7 @@ use sqlx::Row;
 use std::sync::Arc;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
+use tokio::sync::RwLockWriteGuard;
 use tokio_tungstenite::tungstenite::WebSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -32,10 +33,10 @@ pub trait WsSession {
     fn get_heart_beat_message(&self) -> String;
     fn handle_connect(&mut self, websocket_session_id: String);
     fn handle_heartbeat(&mut self);
-    async fn handle_response<Session>(
+    fn handle_response<Session>(
         response: String,
-        session: Arc<RwLock<Session>>,
-        cancel_token: &CancellationToken,
+        session: &mut RwLockWriteGuard<Session>,
+        cancel_token: CancellationToken,
     ) where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static;
 }
@@ -115,16 +116,15 @@ impl WsSession for AccountSession {
         self.last = Utc::now();
     }
 
-    async fn handle_response<Session>(
+    fn handle_response<Session>(
         response: String,
-        session: Arc<RwLock<Session>>,
-        cancel_token: &CancellationToken,
+        session: &mut RwLockWriteGuard<Session>,
+        cancel_token: CancellationToken,
     ) where
-        Session: WsSession + std::marker::Send + std::marker::Sync,
+        Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
         if let Ok(response) = serde_json::from_str::<Response>(&response) {
             if response.status.eq("ok") {
-                let mut session = session.write().await;
                 match response.action.as_str() {
                     "connect" => {
                         session.handle_connect(response.websocket_session_id.clone());
@@ -237,16 +237,15 @@ impl WsSession for MktdataSession {
         self.last = Utc::now();
     }
 
-    async fn handle_response<Session>(
+    fn handle_response<Session>(
         response: String,
-        session: Arc<RwLock<Session>>,
-        cancel_token: &CancellationToken,
+        session: &mut RwLockWriteGuard<Session>,
+        cancel_token: CancellationToken,
     ) where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
         if let Ok(response) = serde_json::from_str::<Response>(&response) {
             if response.status.eq("ok") {
-                let mut session = session.write().await;
                 match response.action.as_str() {
                     "connect" => {
                         session.handle_connect(response.websocket_session_id.clone());
