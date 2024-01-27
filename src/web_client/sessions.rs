@@ -41,7 +41,7 @@ pub trait WsSession {
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static;
 }
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
-struct Heartbeat {
+struct AccHeartbeat {
     action: String,
     #[serde(rename = "auth-token")]
     auth_token: String,
@@ -70,7 +70,7 @@ pub struct AccountSession {
 }
 
 #[derive(FromRow, Clone, Default, Debug, Serialize, Deserialize)]
-pub struct WsConnect {
+pub struct AccConnect {
     action: String,
     #[serde(rename = "value")]
     account_ids: Vec<String>,
@@ -100,7 +100,7 @@ impl WsSession for AccountSession {
     }
 
     fn get_heart_beat_message(&self) -> String {
-        let heartbeat = Heartbeat {
+        let heartbeat = AccHeartbeat {
             action: "heartbeat".to_string(),
             auth_token: self.auth_token.clone(),
         };
@@ -156,8 +156,8 @@ impl AccountSession {
         }))
     }
 
-    pub async fn startup(&mut self, account_id: &str, auth_token: &str) -> WsConnect {
-        let connect = WsConnect {
+    pub async fn startup(&mut self, account_id: &str, auth_token: &str) -> AccConnect {
+        let connect = AccConnect {
             action: "connect".to_string(),
             account_ids: vec![account_id.to_string()],
             auth_token: auth_token.to_string(),
@@ -197,6 +197,42 @@ impl MktdataSession {
     fn api_token(&self) -> Option<ApiQuoteToken> {
         Some(self.api_quote_token.clone())
     }
+
+    pub async fn startup(&mut self) -> MdConnect {
+        let connect = MdConnect {
+            msg_type: "SETUP".to_string(),
+            channel: 0,
+            keepaliveTimeout: 60,
+            acceptKeepaliveTimeout: 60,
+            version: "0.1".to_string(),
+        };
+        connect
+    }
+}
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+pub struct MdConnect {
+    #[serde(rename = "type")]
+    msg_type: String,
+    channel: u32,
+    keepaliveTimeout: u32,
+    acceptKeepaliveTimeout: u32,
+    version: String,
+}
+// { "type": "SETUP", "channel": "0", "keepaliveTimeout": 60, "acceptKeepaliveTimeout": 60, "version": "1.0.0" }
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+struct MdHeartbeat {
+    #[serde(rename = "type")]
+    msg_type: String,
+    channel: u32,
+}
+
+struct MdAuth {
+    #[serde(rename = "type")]
+    msg_type: String,
+    token: String,
+    { "type": "AUTH", "token": "token#123" }
 }
 
 impl WsSession for MktdataSession {
@@ -221,15 +257,15 @@ impl WsSession for MktdataSession {
     }
 
     fn get_heart_beat_message(&self) -> String {
-        // let heartbeat = Heartbeat {
-        //     action: "heartbeat".to_string(),
-        //     // auth_token: self.auth_token.clone(),
-        // };
-        // to_json(&heartbeat).unwrap()
-        "".to_string()
+        let heartbeat = MdHeartbeat {
+            msg_type: "KEEPALIVE".to_string(),
+            channel: 0,
+        };
+        to_json(&heartbeat).unwrap()
     }
 
     fn handle_connect(&mut self, websocket_session_id: String) {
+        // self.session_id = websocket_session_id;
         self.is_alive = true;
     }
 
@@ -244,6 +280,7 @@ impl WsSession for MktdataSession {
     ) where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
+        //TODO: Figure out message handling pattern
         if let Ok(response) = serde_json::from_str::<Response>(&response) {
             if response.status.eq("ok") {
                 match response.action.as_str() {

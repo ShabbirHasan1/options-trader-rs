@@ -28,12 +28,13 @@ mod websocket;
 
 use crate::db_client::SqlQueryBuilder;
 
-use self::sessions::WsConnect;
+use self::sessions::AccConnect;
 
 use super::db_client::DBClient;
 use super::settings::Settings;
 use http_client::HttpClient;
 use sessions::AccountSession;
+use sessions::MdConnect;
 use sessions::MktdataSession;
 use websocket::WebSocketClient;
 // use websocket::SocketMsg;
@@ -200,21 +201,21 @@ impl WebClient {
             .await?;
 
         let (to_ws, _) = broadcast::channel::<String>(100);
-        self.account_updates = Some(
-            self.subscribe_to_account_updates(
-                account_session_url,
-                &data.account.clone(),
-                &self.session.clone(),
-                to_ws.clone(),
-                self.cancel_token.clone(),
-            )
-            .await?,
-        );
-
-        // self.mktdata = Some(
-        //     self.subscribe_to_mktdata(api_quote_token, to_ws.clone(), self.cancel_token.clone())
-        //         .await?,
+        // self.account_updates = Some(
+        //     self.subscribe_to_account_updates(
+        //         account_session_url,
+        //         &data.account.clone(),
+        //         &self.session.clone(),
+        //         to_ws.clone(),
+        //         self.cancel_token.clone(),
+        //     )
+        //     .await?,
         // );
+
+        self.mktdata = Some(
+            self.subscribe_to_mktdata(api_quote_token, to_ws.clone(), self.cancel_token.clone())
+                .await?,
+        );
         Ok(())
     }
 
@@ -315,7 +316,7 @@ impl WebClient {
             WebSocketClient::<AccountSession>::new(account_session, cancel_token.clone())?;
 
         ws_client.subscribe_to_events().await?;
-        ws_client.send_message::<WsConnect>(auth).await?;
+        ws_client.send_message::<AccConnect>(auth).await?;
         Ok(ws_client)
     }
 
@@ -327,9 +328,12 @@ impl WebClient {
     ) -> Result<WebSocketClient<MktdataSession>> {
         let mktdata_session = MktdataSession::new(api_quote_token, to_ws.clone());
 
+        let auth = mktdata_session.write().await.startup().await;
+
         let ws_client = WebSocketClient::<MktdataSession>::new(mktdata_session, cancel_token)?;
 
         ws_client.subscribe_to_events().await?;
+        ws_client.send_message::<MdConnect>(auth).await?;
         Ok(ws_client)
     }
 
