@@ -106,22 +106,11 @@ impl DBClient {
 
         Ok(Self { pool })
     }
-
-    pub fn get_sql_stmt(&self, table_name: &str, local_id: &Uuid, columns: Vec<&str>) -> String {
-        if Uuid::is_nil(local_id) && !table_name.eq("tasty_auth") {
-            SqlQueryBuilder::prepare_insert_statement(table_name, &columns)
-        } else {
-            SqlQueryBuilder::prepare_update_statement(table_name, &columns)
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
-    
 
     #[test]
     fn test_sql_insert_statement() {

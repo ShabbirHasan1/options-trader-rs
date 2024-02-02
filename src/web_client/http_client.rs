@@ -2,12 +2,14 @@ use anyhow::bail;
 use anyhow::Ok;
 use anyhow::Result;
 use core::result::Result as CoreResult;
-use reqwest::Client;
-use reqwest::RequestBuilder;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::from_str as json_from_str;
 use serde_json::to_string as to_json;
+use std::future::IntoFuture;
+use surf::http::headers;
+use surf::Client;
+use surf::RequestBuilder;
 use tracing::info;
 use url::Url;
 
@@ -25,37 +27,35 @@ impl HttpClient {
         }
     }
 
-    fn add_custom_headers(session: &str, request: RequestBuilder) -> RequestBuilder {
-        request
-            .header("product", "tasty-options-trader".to_string())
-            .header("version", "0.1")
-            .header("product", "application/json".to_string())
-            .header("Authorization", session)
+    fn add_custom_headers(session: Option<&str>, request: RequestBuilder) -> RequestBuilder {
+        let request = match session {
+            Some(session) => request
+                .header("Authorization", session)
+                .header("product", "tasty-options-trader".to_string())
+                .header("version", "0.1"),
+            _ => request,
+        };
+        request.header("Content-Type", "application/json".to_string())
     }
 
     pub async fn get<Payload>(&self, endpoint: &str, session: Option<&str>) -> Result<Payload>
     where
         Payload: Serialize + for<'a> Deserialize<'a>,
     {
-        match &session {
-            Some(session) => {
-                let url = Url::parse(format!("{}/{}", self.base_url, endpoint).as_str())?;
-                let response = Self::add_custom_headers(session, self.client.get(url))
-                    .send()
-                    .await?;
+        let url = Url::parse(format!("{}/{}", self.base_url, endpoint).as_str())?;
+        let mut response = match Self::add_custom_headers(session, self.client.get(url)).await {
+            core::result::Result::Ok(val) => val,
+            Err(err) => bail!("Failed get request, error: {}", err),
+        };
 
-                if !response.status().is_success() {
-                    bail!("POST Request failed with status: {}", response.status());
-                }
+        if !response.status().is_success() {
+            bail!("POST Request failed with status: {}", response.status());
+        }
 
-                let body = response.text().await?;
-                info!("POST Response body: {}", body);
-                match json_from_str::<Payload>(&body) {
-                    CoreResult::Ok(val) => Ok(val),
-                    Err(err) => bail!("Failed to parse json on get response, error: {}", err),
-                }
-            }
-            None => bail!("No session token"),
+        info!("GET Response body: {:?}", response);
+        match response.body_json::<Payload>().await {
+            surf::Result::Ok(val) => Ok(val),
+            Err(err) => bail!("Could not read json body, error: {}", err),
         }
     }
 
@@ -72,28 +72,28 @@ impl HttpClient {
         let url = Url::parse(format!("{}/{}", self.base_url, endpoint).as_str())?;
         let payload = to_json(&data)?;
         info!(
-            "request to endpoint: {} with payload: {}",
-            endpoint, payload
+            "request to endpoint: {}/{} with payload: {}",
+            self.base_url, endpoint, payload
         );
-        let response = match &session {
-            Some(session) => {
-                Self::add_custom_headers(session, self.client.post(url))
-                    .json(&data)
-                    .send()
-                    .await?
-            }
-            None => self.client.post(url).json(&data).send().await?,
+        let builder =
+            match Self::add_custom_headers(session, self.client.post(url)).body_json(&data) {
+                core::result::Result::Ok(val) => val,
+                Err(err) => bail!("Failed to post request {}", err),
+            };
+
+        let mut response = match builder.await {
+            core::result::Result::Ok(val) => val,
+            Err(err) => bail!("Failed to post request {}", err),
         };
 
         if !response.status().is_success() {
-            bail!("POST Request failed response: {:?}", response.text().await?);
+            bail!("POST Request failed with status: {}", response.status());
         }
 
-        let body = response.text().await?;
-        info!("POST Response body: {}", body);
-        match json_from_str::<Response>(&body) {
-            CoreResult::Ok(val) => Ok(val),
-            Err(err) => bail!("Failed to parse json on get request, error: {}", err),
+        info!("GET Response body: {:?}", response);
+        match response.body_json::<Response>().await {
+            surf::Result::Ok(val) => Ok(val),
+            Err(err) => bail!("Could not read json body, error: {}", err),
         }
     }
 }

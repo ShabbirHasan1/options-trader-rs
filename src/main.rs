@@ -59,8 +59,8 @@ async fn startup_db() -> DBClient {
     }
 }
 
-const BASE_URL_UAT: &str = "api.cert.tastyworks.com";
-const WS_URL_UAT: &str = "streamer.cert.tastyworks.com";
+const BASE_URL_UAT: &str = "api.tastyworks.com";
+const WS_URL_UAT: &str = "streamer.tastyworks.com";
 
 #[tokio::main]
 async fn main() {
@@ -75,8 +75,7 @@ async fn main() {
         Ok(val) => val,
     };
     let cancel_token = CancellationToken::new();
-    let mut web_client = match WebClient::new("api.cert.tastyworks.com", cancel_token.clone()).await
-    {
+    let mut web_client = match WebClient::new(BASE_URL_UAT, cancel_token.clone()).await {
         Ok(val) => val,
         Err(err) => {
             error!("{}", err);

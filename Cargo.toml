@@ -16,7 +16,6 @@ tokio = { version = "1.30.0", features = [
 ] }
 tokio-tungstenite = { version = "0.21.0", features = ["native-tls"] }
 tokio-util = "0.7.8"
-reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
@@ -41,6 +40,7 @@ exitcode = "1.1.2"
 native-tls = "0.2.11"
 chrono = "0.4"
 futures-util = "0.3.29"
+surf = "2.3.2"
 
 [dev-dependencies]
 tokio-test = "0.4.3"

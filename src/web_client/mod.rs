@@ -38,20 +38,9 @@ use http_client::HttpClient;
 use sessions::AccountSession;
 use sessions::MktdataSession;
 use websocket::WebSocketClient;
-// use websocket::SocketMsg;
-
-#[cfg(test)]
-const BASE_URL_UAT: &str = "api.cert.tastyworks.com";
-#[cfg(test)]
-const WS_URL_UAT: &str = "streamer.cert.tastyworks.com";
-
-#[cfg(not(test))]
-const BASE_URL_UAT: &str = "api.cert.tastyworks.com";
-#[cfg(not(test))]
-const WS_URL_UAT: &str = "streamer.cert.tastyworks.com";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct WrappedResponse<Response> {
+struct Wrapper<Response> {
     data: Response,
     context: String,
 }
@@ -202,10 +191,10 @@ impl WebClient {
             .await?;
 
         let (to_ws, _) = broadcast::channel::<String>(100);
-        self.mktdata = Some(
-            self.subscribe_to_mktdata(api_quote_token, to_ws.clone(), self.cancel_token.clone())
-                .await?,
-        );
+        // self.mktdata = Some(
+        //     self.subscribe_to_mktdata(api_quote_token, to_ws.clone(), self.cancel_token.clone())
+        //         .await?,
+        // );
 
         self.account_updates = Some(
             self.subscribe_to_account_updates(
@@ -219,6 +208,16 @@ impl WebClient {
         );
 
         Ok(())
+    }
+
+    pub async fn send_message<Message>(&self, message: Message) -> Result<()>
+    where
+        Message: Serialize + for<'a> Deserialize<'a>,
+    {
+        if let Some(session) = &self.mktdata {
+            session.send_message::<Message>(message).await?
+        }
+        bail!("System not ready, call startup first");
     }
 
     async fn fetch_auth_from_db(
@@ -274,10 +273,10 @@ impl WebClient {
     async fn refresh_session_token(
         http_client: &HttpClient,
         mut data: AuthCreds,
-    ) -> Result<WrappedResponse<AuthResponse>> {
+    ) -> Result<Wrapper<AuthResponse>> {
         data.remember_me = true;
         let refresh_token = http_client
-            .post::<AuthCreds, WrappedResponse<AuthResponse>>("sessions", data, None)
+            .post::<AuthCreds, Wrapper<AuthResponse>>("sessions", data, None)
             .await?;
         info!("Refresh token success, token: {:?}", refresh_token);
         Ok(refresh_token)
@@ -289,7 +288,7 @@ impl WebClient {
         auth_token: &str,
     ) -> Result<ApiQuoteToken> {
         let response = http_client
-            .get::<WrappedResponse<ApiQuoteToken>>("api-quote-tokens", Some(auth_token))
+            .get::<Wrapper<ApiQuoteToken>>("api-quote-tokens", Some(auth_token))
             .await?;
         Ok(response.data)
     }
@@ -341,30 +340,32 @@ impl WebClient {
         Ok(ws_client)
     }
 
-    // async fn post_office(mut receiver: Receiver<String>, cancel_token: CancellationToken) {
-    //     tokio::spawn(async move {
-    //         loop {
-    //             tokio::select! {
-    //                 msg = receiver.recv() => {
-    //                     match msg {
-    //                         CoreResult::Ok(msg) => {
-    //                             info!("{:?}", msg);
-    //                             // Your further processing logic here
-    //                         }
-    //                         Err(RecvError::Lagged(err)) => warn!("websocket channel skipping a number of messages: {}", err),
-    //                         Err(RecvError::Closed) => {
-    //                             error!("websocket channel closed");
-    //                             cancel_token.cancel()
-    //                         }
-    //                     };
-    //                 }
-    //                 _ = cancel_token.cancelled() => {
-    //                     break
-    //                 }
-    //             }
-    //         }
-    //     });
-    // }
+    //postman collects messages for the app from both sessions and channels to the rest
+    // of the app - or maybe the session hold a sender given by client
+    async fn post_office(mut receiver: Receiver<String>, cancel_token: CancellationToken) {
+        tokio::spawn(async move {
+            // loop {
+            //     tokio::select! {
+            //     //     msg = receiver.recv() => {
+            //     //         match msg {
+            //     //             CoreResult::Ok(msg) => {
+            //     //                 info!("{:?}", msg);
+            //     //                 // Your further processing logic here
+            //     //             }
+            //     //             Err(RecvError::Lagged(err)) => warn!("websocket channel skipping a number of messages: {}", err),
+            //     //             Err(RecvError::Closed) => {
+            //     //                 error!("websocket channel closed");
+            //     //                 cancel_token.cancel()
+            //     //             }
+            //     //         };
+            //     //     }
+            //     //     _ = cancel_token.cancelled() => {
+            //     //         break
+            //     //     }
+            //     // }
+            // }
+        });
+    }
 
     async fn subscribe_to_mktdata_updates() {}
 }
