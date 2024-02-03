@@ -11,16 +11,15 @@ use sqlx::postgres::PgRow;
 use sqlx::FromRow;
 use sqlx::Row;
 use std::thread;
-
 use tokio::sync::broadcast;
-
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::Sender;
-
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
-
+use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 mod http_client;
 mod sessions;
@@ -192,16 +191,17 @@ impl WebClient {
 
         let (to_ws, _) = broadcast::channel::<String>(100);
         // self.mktdata = Some(
-        //     self.subscribe_to_mktdata(api_quote_token, to_ws.clone(), self.cancel_token.clone())
+        //     self.subscribe_to_mktdata(api_quote_token, to_ws, self.cancel_token.clone())
         //         .await?,
         // );
 
+        let (to_ws, _) = broadcast::channel::<String>(100);
         self.account_updates = Some(
             self.subscribe_to_account_updates(
                 account_session_url,
                 &data.account.clone(),
                 &self.session.clone(),
-                to_ws.clone(),
+                to_ws,
                 self.cancel_token.clone(),
             )
             .await?,
@@ -210,7 +210,11 @@ impl WebClient {
         Ok(())
     }
 
-    pub async fn send_message<Message>(&self, message: Message) -> Result<()>
+    pub async fn get_http_client<Message>(&self) -> (&HttpClient, &str) {
+        (&self.http_client, &self.session)
+    }
+
+    pub async fn send_message_to_ws<Message>(&self, message: Message) -> Result<()>
     where
         Message: Serialize + for<'a> Deserialize<'a>,
     {
@@ -340,32 +344,53 @@ impl WebClient {
         Ok(ws_client)
     }
 
-    //postman collects messages for the app from both sessions and channels to the rest
-    // of the app - or maybe the session hold a sender given by client
-    async fn post_office(mut receiver: Receiver<String>, cancel_token: CancellationToken) {
-        tokio::spawn(async move {
-            // loop {
-            //     tokio::select! {
-            //     //     msg = receiver.recv() => {
-            //     //         match msg {
-            //     //             CoreResult::Ok(msg) => {
-            //     //                 info!("{:?}", msg);
-            //     //                 // Your further processing logic here
-            //     //             }
-            //     //             Err(RecvError::Lagged(err)) => warn!("websocket channel skipping a number of messages: {}", err),
-            //     //             Err(RecvError::Closed) => {
-            //     //                 error!("websocket channel closed");
-            //     //                 cancel_token.cancel()
-            //     //             }
-            //     //         };
-            //     //     }
-            //     //     _ = cancel_token.cancelled() => {
-            //     //         break
-            //     //     }
-            //     // }
-            // }
-        });
-    }
+    // //postman collects messages for the app from both sessions and channels to the rest
+    // // of the app - or maybe the session hold a sender given by client
+    // async fn post_office(
+    //     to_app: Sender<String>,
+    //     mut accounts_receiver: Receiver<String>,
+    //     mut mktdata_receiver: Receiver<String>,
+    //     cancel_token: CancellationToken,
+    // ) {
+    //     fn handle_msg(
+    //         msg: CoreResult<String, RecvError>,
+    //         to_app: &Sender<String>,
+    //         cancel_token: &CancellationToken,
+    //     ) {
+    //         match msg {
+    //             CoreResult::Ok(msg) => {
+    //                 info!("{:?}", msg);
+    //                 if let Err(err) = to_app.send(msg.clone()) {
+    //                     error!("Failed to send message {:?} to app, error: {}", msg, err);
+    //                     cancel_token.cancel();
+    //                 }
+    //                 // Your further processing logic here
+    //             }
+    //             Err(RecvError::Lagged(err)) => {
+    //                 warn!("websocket channel skipping a number of messages: {}", err)
+    //             }
+    //             Err(RecvError::Closed) => {
+    //                 error!("websocket channel closed");
+    //                 cancel_token.cancel()
+    //             }
+    //         };
+    //     }
+    //     tokio::spawn(async move {
+    //         loop {
+    //             tokio::select! {
+    //                 msg = accounts_receiver.recv() => {
+    //                     handle_msg(msg, &to_app, &cancel_token);
+    //                 }
+    //                 msg = mktdata_receiver.recv() => {
+    //                     handle_msg(msg, &to_app, &cancel_token);
+    //                 }
+    //                 _ = cancel_token.cancelled() => {
+    //                     break
+    //                 }
+    //             }
+    //         }
+    //     });
+    // }
 
     async fn subscribe_to_mktdata_updates() {}
 }
