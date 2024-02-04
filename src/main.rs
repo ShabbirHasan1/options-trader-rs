@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::env;
+use std::sync::Arc;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
@@ -7,12 +8,18 @@ use tracing::info;
 use tracing::warn;
 
 mod db_client;
+mod mktdata;
+mod orders;
 mod settings;
+mod strategies;
 mod utils;
 mod web_client;
 
 use db_client::DBClient;
+use mktdata::MktData;
+use orders::Orders;
 use settings::Config;
+use strategies::Strategies;
 use web_client::WebClient;
 
 #[derive(Parser, Debug)]
@@ -90,6 +97,13 @@ async fn main() {
         error!("Failed to startup web_client, error: {}, exiting app", err);
         std::process::exit(1);
     }
+    let _strategies = match Strategies::new(Arc::new(web_client), cancel_token.clone()).await {
+        Err(err) => {
+            error!("Failed to startup strategies, error: {}, exiting app", err);
+            std::process::exit(1);
+        }
+        Ok(val) => val,
+    };
     loop {
         tokio::select! {
             event = receiver.recv() => {

@@ -40,6 +40,10 @@ impl<Session> WebSocketClient<Session> {
         })
     }
 
+    pub fn get_session(&self) -> Arc<RwLock<Session>> {
+        self.session.clone()
+    }
+
     async fn handle_socket_messages(
         message: Option<Result<Message, WebSocketError>>,
         session: Arc<RwLock<Session>>,

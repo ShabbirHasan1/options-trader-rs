@@ -4,6 +4,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::to_string as to_json;
 use sqlx::FromRow;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
@@ -11,6 +13,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
 use url::Url;
+
+use crate::web_client::sessions::md_api::AddItem;
 
 use self::md_api::AuthState;
 use super::ApiQuoteToken;
@@ -72,6 +76,41 @@ pub struct AccountSession {
     to_app: Sender<String>,
     is_alive: bool,
     heartbeat_interval: u64,
+}
+
+impl AccountSession {
+    pub fn new(
+        url: &str,
+        to_ws: Sender<String>,
+        to_app: Sender<String>,
+    ) -> Arc<RwLock<AccountSession>> {
+        Arc::new(RwLock::new(AccountSession {
+            url: Url::parse(url).unwrap(),
+            session_id: String::default(),
+            auth_token: String::default(),
+            last_received: Utc::now(),
+            last_sent: Utc::now(),
+            to_ws,
+            to_app,
+            is_alive: false,
+            heartbeat_interval: 30,
+        }))
+    }
+
+    pub async fn startup(&mut self, account_id: &str, auth_token: &str) -> acc_api::Connect {
+        let connect = acc_api::Connect {
+            action: "connect".to_string(),
+            account_ids: vec![account_id.to_string()],
+            auth_token: auth_token.to_string(),
+        };
+        self.auth_token = auth_token.to_string();
+        connect
+    }
+
+    fn handle_connect(&mut self, websocket_session_id: String) {
+        self.session_id = websocket_session_id;
+        self.is_alive = true;
+    }
 }
 
 impl WsSession for AccountSession {
@@ -145,42 +184,8 @@ impl WsSession for AccountSession {
     }
 }
 
-impl AccountSession {
-    pub fn new(
-        url: &str,
-        to_ws: Sender<String>,
-        to_app: Sender<String>,
-    ) -> Arc<RwLock<AccountSession>> {
-        Arc::new(RwLock::new(AccountSession {
-            url: Url::parse(url).unwrap(),
-            session_id: String::default(),
-            auth_token: String::default(),
-            last_received: Utc::now(),
-            last_sent: Utc::now(),
-            to_ws,
-            to_app,
-            is_alive: false,
-            heartbeat_interval: 30,
-        }))
-    }
-
-    pub async fn startup(&mut self, account_id: &str, auth_token: &str) -> acc_api::Connect {
-        let connect = acc_api::Connect {
-            action: "connect".to_string(),
-            account_ids: vec![account_id.to_string()],
-            auth_token: auth_token.to_string(),
-        };
-        self.auth_token = auth_token.to_string();
-        connect
-    }
-
-    fn handle_connect(&mut self, websocket_session_id: String) {
-        self.session_id = websocket_session_id;
-        self.is_alive = true;
-    }
-}
-
 pub(crate) mod md_api {
+
     use super::*;
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -196,7 +201,7 @@ pub(crate) mod md_api {
     pub struct FeedSubscription {
         #[serde(rename = "type")]
         pub msg_type: String,
-        pub channel: u32,
+        pub channel: i64,
         pub add: Vec<AddItem>,
     }
 
@@ -204,7 +209,7 @@ pub(crate) mod md_api {
     pub struct ChannelCancel {
         #[serde(rename = "type")]
         pub msg_type: String,
-        pub channel: u32,
+        pub channel: i64,
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -219,7 +224,7 @@ pub(crate) mod md_api {
     pub struct ClientFeedSubscription {
         #[serde(rename = "type")]
         pub msg_type: String,
-        pub channel: u32,
+        pub channel: u64,
         pub add: Vec<AddItem>,
     }
 
@@ -272,6 +277,15 @@ pub(crate) mod md_api {
         pub user_id: Option<String>,
         pub channel: u64,
     }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct Channel {
+        #[serde(rename = "type")]
+        pub msg_type: String,
+        pub channel: i64,
+        pub service: String,
+        pub parameters: HashMap<String, String>,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -281,8 +295,70 @@ pub struct MktdataSession {
     last_sent: DateTime<Utc>,
     to_ws: Sender<String>,
     to_app: Sender<String>,
+    channels: Vec<String>,
     is_alive: bool,
     heartbeat_interval: u64,
+}
+
+impl MktdataSession {
+    pub fn new(
+        api_quote_token: ApiQuoteToken,
+        to_ws: Sender<String>,
+        to_app: Sender<String>,
+    ) -> Arc<RwLock<MktdataSession>> {
+        Arc::new(RwLock::new(MktdataSession {
+            api_quote_token,
+            last_received: Utc::now(),
+            last_sent: Utc::now(),
+            to_ws,
+            to_app,
+            channels: Vec::default(),
+            is_alive: false,
+            heartbeat_interval: 30,
+        }))
+    }
+
+    pub async fn startup(&mut self) -> md_api::Connect {
+        md_api::Connect {
+            msg_type: "SETUP".to_string(),
+            channel: 0,
+            keepalive_timeout: self.heartbeat_interval,
+            accept_keepalive_timeout: self.heartbeat_interval,
+            version: "0.1".to_string(),
+        }
+    }
+
+    fn handle_auth(&self, auth: AuthState) -> Option<md_api::Auth> {
+        match auth.state.as_str() {
+            "UNAUTHORIZED" => Some(md_api::Auth {
+                msg_type: "AUTH".to_string(),
+                channel: 0,
+                token: self.api_quote_token.token.clone(),
+            }),
+            "AUTHORIZED" => {
+                info!("Connection authorized, channel: {}", 0);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    pub fn subscribe(&mut self, symbol: &str) -> md_api::Channel {
+        let mut parameters = HashMap::new();
+        parameters.insert("contract".to_string(), "AUTO".to_string());
+        let message = md_api::Channel {
+            msg_type: "CHANNEL_REQUEST".to_string(),
+            channel: self.channels.len() as i64,
+            service: "FEED".to_string(),
+            parameters,
+        };
+        self.channels.push(symbol.to_string());
+        message
+    }
+
+    fn handle_connect(&mut self) {
+        self.is_alive = true;
+    }
 }
 
 impl WsSession for MktdataSession {
@@ -334,9 +410,6 @@ impl WsSession for MktdataSession {
     where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
-        //TODO: Figure out message handling pattern
-        // if let (response) = serde_json::from_str::<md_api::Connect>(&response) {
-        //     ...
         if let Ok(response) = serde_json::from_str::<md_api::AuthState>(&response) {
             info!("connection response auth state: {:?}", response);
             if let Some(auth) = self.handle_auth(response) {
@@ -347,6 +420,22 @@ impl WsSession for MktdataSession {
         } else if let Ok(response) = serde_json::from_str::<md_api::Heartbeat>(&response) {
             info!("heartbeat response {:?}", response);
             self.handle_heartbeat();
+        } else if let Ok(response) = serde_json::from_str::<md_api::Channel>(&response) {
+            info!("channel response {:?}", response);
+            if response.msg_type.eq("CHANNEL_OPENED") {
+                let channel = response.channel;
+                let symbol = self.channels[channel as usize].to_string();
+                let subscription = md_api::FeedSubscription {
+                    msg_type: "FEED_SUBSCRIPTION".to_string(),
+                    channel,
+                    add: vec![AddItem {
+                        symbol,
+                        msg_type: "Candle".to_string(),
+                        from_time: None,
+                    }],
+                };
+                let _ = self.to_ws.send(to_json(&subscription).unwrap()).unwrap();
+            }
         } else {
             let _ = self.to_app.send(response);
         }
@@ -357,52 +446,5 @@ impl WsSession for MktdataSession {
         //     }
         //     Err(err) => error!("Failed to parse, error: {}", err),
         // }
-    }
-}
-
-impl MktdataSession {
-    pub fn new(
-        api_quote_token: ApiQuoteToken,
-        to_ws: Sender<String>,
-        to_app: Sender<String>,
-    ) -> Arc<RwLock<MktdataSession>> {
-        Arc::new(RwLock::new(MktdataSession {
-            api_quote_token,
-            last_received: Utc::now(),
-            last_sent: Utc::now(),
-            to_ws,
-            to_app,
-            is_alive: false,
-            heartbeat_interval: 30,
-        }))
-    }
-
-    pub async fn startup(&mut self) -> md_api::Connect {
-        md_api::Connect {
-            msg_type: "SETUP".to_string(),
-            channel: 0,
-            keepalive_timeout: self.heartbeat_interval,
-            accept_keepalive_timeout: self.heartbeat_interval,
-            version: "0.1".to_string(),
-        }
-    }
-
-    fn handle_auth(&self, auth: AuthState) -> Option<md_api::Auth> {
-        match auth.state.as_str() {
-            "UNAUTHORIZED" => Some(md_api::Auth {
-                msg_type: "AUTH".to_string(),
-                channel: 0,
-                token: self.api_quote_token.token.clone(),
-            }),
-            "AUTHORIZED" => {
-                info!("Connection authorized, channel: {}", 0);
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn handle_connect(&mut self) {
-        self.is_alive = true;
     }
 }

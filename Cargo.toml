@@ -41,6 +41,9 @@ native-tls = "0.2.11"
 chrono = "0.4"
 futures-util = "0.3.29"
 surf = "2.3.2"
+flate2 = { version = "1.0.17", features = [
+    "zlib-ng",
+], default-features = false }
 
 [dev-dependencies]
 tokio-test = "0.4.3"
