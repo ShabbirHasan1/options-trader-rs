@@ -7,19 +7,18 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
+mod account;
 mod db_client;
 mod mktdata;
 mod orders;
 mod settings;
 mod strategies;
-mod utils;
 mod web_client;
 
 use db_client::DBClient;
-use mktdata::MktData;
-use orders::Orders;
 use settings::Config;
 use strategies::Strategies;
+use web_client::EndPoint;
 use web_client::WebClient;
 
 #[derive(Parser, Debug)]
@@ -40,7 +39,7 @@ fn start_logging() {
         // Don't display the event's target (module path)
         .with_target(false)
         // Assign a log-level
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::INFO)
         // Use a more compact, abbreviated log format
         .compact()
         .finish();
@@ -66,8 +65,11 @@ async fn startup_db() -> DBClient {
     }
 }
 
-const BASE_URL_UAT: &str = "api.tastyworks.com";
-const WS_URL_UAT: &str = "streamer.tastyworks.com";
+const BASE_URL_UAT: &str = "api.cert.tastyworks.com";
+const BASE_URL_PROD: &str = "api.tastyworks.com";
+
+const WS_URL_UAT: &str = "streamer.cert.tastyworks.com";
+const WS_URL_PROD: &str = "streamer.tastyworks.com";
 
 #[tokio::main]
 async fn main() {
@@ -82,7 +84,17 @@ async fn main() {
         Ok(val) => val,
     };
     let cancel_token = CancellationToken::new();
-    let mut web_client = match WebClient::new(BASE_URL_UAT, cancel_token.clone()).await {
+    let http_url = if settings.endpoint.eq(&EndPoint::Live) {
+        BASE_URL_PROD
+    } else {
+        BASE_URL_UAT
+    };
+    let ws_url = if settings.endpoint.eq(&EndPoint::Live) {
+        WS_URL_PROD
+    } else {
+        WS_URL_UAT
+    };
+    let mut web_client = match WebClient::new(http_url, cancel_token.clone()).await {
         Ok(val) => val,
         Err(err) => {
             error!("{}", err);
@@ -93,7 +105,7 @@ async fn main() {
     let mut is_graceful_shutdown = false;
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
     let mut receiver = web_client.subscribe_to_events();
-    if let Err(err) = web_client.startup(WS_URL_UAT, settings, &db).await {
+    if let Err(err) = web_client.startup(ws_url, settings, &db).await {
         error!("Failed to startup web_client, error: {}, exiting app", err);
         std::process::exit(1);
     }
@@ -106,9 +118,6 @@ async fn main() {
     };
     loop {
         tokio::select! {
-            event = receiver.recv() => {
-                info!("Receieved message from websocket {}", event.unwrap());
-            }
             _ = cancel_token.cancelled() => {
                 if is_graceful_shutdown {
                     std::process::exit(0);

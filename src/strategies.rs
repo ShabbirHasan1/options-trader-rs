@@ -1,17 +1,17 @@
+use anyhow::bail;
 use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
+use tracing::info;
 use tracing::warn;
 
-use crate::web_client;
-use crate::web_client::http_client::HttpClient;
-
+use super::account::Account;
 use super::mktdata::MktData;
 use super::orders::Orders;
 use super::web_client::WebClient;
@@ -26,34 +26,58 @@ mod tt_api {
     }
     #[derive(Clone, Debug, Deserialize, Serialize)]
     pub struct Position {
+        #[serde(rename = "instrument-type")]
         pub instrument_type: String,
         pub multiplier: i32,
+        #[serde(rename = "realized-today")]
         pub realized_today: i32,
+        #[serde(rename = "is-frozen")]
         pub is_frozen: bool,
+        #[serde(rename = "updated-at")]
         pub updated_at: String,
+        #[serde(rename = "average-daily-market-close-price")]
         pub average_daily_market_close_price: i32,
+        #[serde(rename = "deliverable-type")]
         pub deliverable_type: String,
+        #[serde(rename = "underlying-symbol")]
         pub underlying_symbol: String,
+        #[serde(rename = "mark-price")]
         pub mark_price: i32,
+        #[serde(rename = "account-number")]
         pub account_number: String,
+        #[serde(rename = "fixing-price")]
         pub fixing_price: i32,
         pub quantity: i32,
+        #[serde(rename = "realized-day-gain-date")]
         pub realized_day_gain_date: String,
+        #[serde(rename = "expires-at")]
         pub expires_at: String,
         pub mark: i32,
+        #[serde(rename = "realized-day-gain")]
         pub realized_day_gain: i32,
+        #[serde(rename = "realized-day-gain-effect")]
         pub realized_day_gain_effect: String,
+        #[serde(rename = "cost-effect")]
         pub cost_effect: String,
+        #[serde(rename = "close-price")]
         pub close_price: i32,
+        #[serde(rename = "average-yearly-market-close-price")]
         pub average_yearly_market_close_price: i32,
+        #[serde(rename = "average-open-price")]
         pub average_open_price: i32,
+        #[serde(rename = "is-suppressed")]
         pub is_suppressed: bool,
         pub created_at: String,
         pub symbol: String,
+        #[serde(rename = "realized-today-date")]
         pub realized_today_date: String,
+        #[serde(rename = "order-id")]
         pub order_id: i32,
+        #[serde(rename = "realized-today-effect")]
         pub realized_today_effect: String,
+        #[serde(rename = "quantity-direction")]
         pub quantity_direction: String,
+        #[serde(rename = "restricted-quantity")]
         pub restricted_quantity: i32,
     }
 }
@@ -95,16 +119,35 @@ pub(crate) struct Strategies {}
 
 impl Strategies {
     pub async fn new(web_client: Arc<WebClient>, cancel_token: CancellationToken) -> Result<Self> {
+        let _account = Account::new(Arc::clone(&web_client), cancel_token.clone());
         let mktdata = MktData::new(Arc::clone(&web_client), cancel_token.clone());
-        let orders = Orders::new(Arc::clone(&web_client));
+        let orders = Orders::new(Arc::clone(&web_client), cancel_token.clone());
+        let mut receiver = web_client.subscribe_to_events();
         tokio::spawn(async move {
             let mut strategies = Self::get_strategies(&web_client, Vec::default()).await;
             Self::subscribe_to_updates(&strategies, &mktdata, &cancel_token).await;
-
             loop {
                 tokio::select! {
+                    msg = receiver.recv() => {
+                        match msg {
+                            Err(RecvError::Lagged(err)) => warn!("Publisher channel skipping a number of messages: {}", err),
+                            Err(RecvError::Closed) => {
+                                error!("Publisher channel closed");
+                                cancel_token.cancel();
+                            }
+                            std::result::Result::Ok(val) => {
+                                match Self::handle_msg(val, &cancel_token) {
+                                    Ok(val) => info!("All good {:?}", val),
+                                    _ => ()
+                                }
+                            }
+                        }
+                    }
+                    _ = cancel_token.cancelled() => {
+                        break
+                    }
                     _ = sleep(Duration::from_secs(5)) => {
-                        strategies.iter().for_each(|strategy| Self::check_stops(strategy, &mktdata, &orders));
+                        strategies.iter().for_each(|strategy| Self::check_stops(&strategy, &mktdata, &orders));
                     }
                     _ = sleep(Duration::from_secs(30)) => {
                         strategies = Self::get_strategies(&web_client, strategies).await;
@@ -117,6 +160,15 @@ impl Strategies {
             }
         });
         Ok(Self {})
+    }
+
+    fn handle_msg(msg: String, cancel_token: &CancellationToken) -> Result<tt_api::Position> {
+        match serde_json::from_str::<tt_api::Position>(&msg) {
+            Ok(val) => Ok(val),
+            Err(err) => {
+                bail!("Failed to deserialize position, error: {}", err)
+            }
+        }
     }
 
     async fn subscribe_to_updates(
@@ -136,45 +188,36 @@ impl Strategies {
         }
     }
 
-    fn check_stops(
-        strategy: &Box<dyn Strategy + Send + Sync + 'static>,
-        _mktdata: &MktData,
-        orders: &Orders,
-    ) {
+    fn check_stops<Strategy>(strategy: &Strategy, _mktdata: &MktData, orders: &Orders) {
+        let _ = strategy;
         // strategies.iter.map()
+        orders.liquidate_position();
     }
 
     async fn get_strategies(
         web_client: &WebClient,
         current: Vec<Box<dyn Strategy + Send + Sync + 'static>>,
     ) -> Vec<Box<dyn Strategy + Send + Sync + 'static>> {
-        fn to_strategy(position: tt_api::Position) -> Box<dyn Strategy + Send + Sync + 'static> {
-            Box::new(CreditSpread::new(position))
-        }
+        // fn to_strategy(position: tt_api::Position) -> Box<dyn Strategy + Send + Sync + 'static> {
+        //     Box::new(CreditSpread::new(position))
+        // }
 
-        let positions = match web_client
-            .get::<tt_api::Positions>(
-                format!(
-                    "accounts/{}/positions?net-positions=true",
-                    web_client.get_account()
-                )
-                .as_str(),
-            )
-            .await
-        {
-            Ok(val) => val,
-            Err(err) => {
-                warn!(
-                    "Failed to refresh position data from broker, error: {}",
-                    err
-                );
-                return current;
-            }
-        };
-        positions
-            .positions
-            .iter()
-            .map(|p| to_strategy(p.clone()))
-            .collect()
+        // let positions = match web_client
+        //     .get::<tt_api::Position>(
+        //         format!("accounts/{}/positions", web_client.get_account()).as_str(),
+        //     )
+        //     .await
+        // {
+        //     Ok(val) => val,
+        //     Err(err) => {
+        //         warn!(
+        //             "Failed to refresh position data from broker, error: {}",
+        //             err
+        //         );
+        //         return current;
+        //     }
+        // };
+        // positions.iter().map(|p| to_strategy(p.clone())).collect()
+        Vec::new()
     }
 }

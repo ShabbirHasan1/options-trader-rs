@@ -2,7 +2,6 @@ use anyhow::bail;
 use anyhow::Ok;
 use anyhow::Result;
 use chrono::DateTime;
-use chrono::Duration;
 use chrono::Utc;
 use core::result::Result as CoreResult;
 use serde::Deserialize;
@@ -10,21 +9,15 @@ use serde::Serialize;
 use sqlx::postgres::PgRow;
 use sqlx::FromRow;
 use sqlx::Row;
-use std::sync::Arc;
-use std::thread;
 use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::Sender;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
-use tracing::error;
 use tracing::info;
-use tracing::warn;
 
 pub(crate) mod http_client;
-mod sessions;
+pub(crate) mod sessions;
 mod tt_api;
 mod websocket;
 
@@ -187,15 +180,17 @@ impl WebClient {
         self.session = updates.data.session;
         self.account = data.account.clone();
 
-        let api_quote_token = self
-            .get_api_quote_token(&self.http_client, &self.session)
-            .await?;
+        // let api_quote_token = self
+        //     .get_api_quote_token(&self.http_client, &self.session)
+        //     .await?;
 
-        let (to_ws, _) = broadcast::channel::<String>(100);
-        self.mktdata = Some(
-            self.subscribe_to_mktdata(api_quote_token, to_ws, self.cancel_token.clone())
-                .await?,
-        );
+        // let (to_ws, _) = broadcast::channel::<String>(100);
+        // self.mktdata = Some(
+        //     self.subscribe_to_mktdata(api_quote_token, to_ws, self.cancel_token.clone())
+        //         .await?,
+        // );
+
+        info!("Session token {}", self.session.clone());
 
         let (to_ws, _) = broadcast::channel::<String>(100);
         self.account_updates = Some(
@@ -214,19 +209,15 @@ impl WebClient {
 
     pub async fn get<Payload>(&self, endpoint: &str) -> Result<Payload>
     where
-        Payload: Serialize + for<'a> Deserialize<'a>,
+        Response: Serialize + for<'a> Deserialize<'a>,
     {
         self.http_client
-            .get::<Payload>(endpoint, Some(&self.session))
+            .get::<Response>(endpoint, Some(&self.session))
             .await
     }
 
     pub fn get_account(&self) -> &str {
         &self.account
-    }
-
-    pub fn get_mktdata_receiver(&self) -> Receiver<String> {
-        self.to_app.subscribe()
     }
 
     pub async fn subscribe_to_symbol(&self, symbol: &str) -> Result<()> {

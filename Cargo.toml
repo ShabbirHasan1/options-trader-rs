@@ -8,9 +8,8 @@ about = "options risk management"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 tokio = { version = "1.30.0", features = [
-    "full",
+    "rt-multi-thread",
     "macros",
-    "rt",
     "signal",
     "tracing",
 ] }
@@ -41,10 +40,3 @@ native-tls = "0.2.11"
 chrono = "0.4"
 futures-util = "0.3.29"
 surf = "2.3.2"
-flate2 = { version = "1.0.17", features = [
-    "zlib-ng",
-], default-features = false }
-
-[dev-dependencies]
-tokio-test = "0.4.3"
-mockito = "1.2.0"

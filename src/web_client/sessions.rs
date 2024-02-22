@@ -5,11 +5,11 @@ use serde::Serialize;
 use serde_json::to_string as to_json;
 use sqlx::FromRow;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use url::Url;
@@ -64,6 +64,13 @@ pub(crate) mod acc_api {
         #[serde(rename = "auth-token")]
         pub auth_token: String,
     }
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct Payload {
+        #[serde(rename = "type")]
+        pub msg_type: String,
+        pub data: String,
+        pub timestamp: u32,
+    }
 }
 #[derive(Clone, Debug)]
 pub struct AccountSession {
@@ -93,7 +100,7 @@ impl AccountSession {
             to_ws,
             to_app,
             is_alive: false,
-            heartbeat_interval: 30,
+            heartbeat_interval: 60,
         }))
     }
 
@@ -158,10 +165,15 @@ impl WsSession for AccountSession {
         self.last_received = Utc::now();
     }
 
+    fn close(&mut self) {
+        self.close_session();
+    }
+
     fn handle_response<Session>(&mut self, response: String, cancel_token: CancellationToken)
     where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
+        debug!("Response on account session, msg: {}", response);
         if let Ok(response) = serde_json::from_str::<acc_api::Response>(&response) {
             if response.status.eq("ok") {
                 match response.action.as_str() {
@@ -169,7 +181,7 @@ impl WsSession for AccountSession {
                         self.handle_connect(response.websocket_session_id.clone());
                     }
                     "heartbeat" => self.handle_heartbeat(),
-                    _ => (),
+                    _ => info!("Here, {:?}", response),
                 };
             } else {
                 error!(

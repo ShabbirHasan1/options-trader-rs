@@ -1,4 +1,16 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
+use std::sync::Arc;
+use tokio::sync::broadcast::error::RecvError;
+use tokio_util::sync::CancellationToken;
+use tracing::error;
+use tracing::info;
+use tracing::warn;
+
+use crate::web_client::WebClient;
+
+use self::tt_api::AccountData;
+use super::web_client::sessions::acc_api;
 
 mod tt_api {
     use super::*;
@@ -117,5 +129,48 @@ mod tt_api {
         pub effective_cryptocurrency_buying_power: String,
         #[serde(rename = "updated-at")]
         pub updated_at: String,
+    }
+}
+
+pub struct Account {
+    web_client: Arc<WebClient>,
+}
+
+impl Account {
+    pub fn new(web_client: Arc<WebClient>, cancel_token: CancellationToken) -> Self {
+        let mut receiver = web_client.subscribe_to_events();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    msg = receiver.recv() => {
+                        match msg {
+                            Err(RecvError::Lagged(err)) => warn!("Publisher channel skipping a number of messages: {}", err),
+                            Err(RecvError::Closed) => {
+                                error!("Publisher channel closed");
+                                cancel_token.cancel();
+                            }
+                            std::result::Result::Ok(val) => {
+                                Self::handle_msg(val, &cancel_token);
+                            }
+                        }
+                    }
+                    _ = cancel_token.cancelled() => {
+                        break
+                    }
+                }
+            }
+        });
+        Self { web_client }
+    }
+
+    fn handle_msg(msg: String, _cancel_token: &CancellationToken) {
+        if let Ok(payload) = serde_json::from_str::<acc_api::Payload>(&msg) {
+            if payload.msg_type.ne("AccountBalance") {
+                return;
+            }
+            if let Ok(msg) = serde_json::from_str::<tt_api::AccountBalance>(&payload.data) {
+                info!("Last account balance message received, msg: {:?}", msg);
+            }
+        }
     }
 }

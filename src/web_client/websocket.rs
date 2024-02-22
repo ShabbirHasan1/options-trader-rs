@@ -53,31 +53,12 @@ impl<Session> WebSocketClient<Session> {
     {
         match message {
             Some(CoreResult::Ok(Message::Text(response))) => {
-                info!("Receiving message {:?}", response);
                 session
                     .write()
                     .await
                     .handle_response::<Session>(response, cancel_token);
             }
-            Some(CoreResult::Ok(Message::Pong(msg))) => {
-                info!("Message received on websocket channel, msg: {:?}", msg);
-            }
-            Some(CoreResult::Ok(Message::Ping(msg))) => {
-                info!("Message received on websocket channel, msg: {:?}", msg);
-            }
-            Some(CoreResult::Ok(Message::Binary(msg))) => {
-                info!("Message received on websocket channel, msg: {:?}", msg);
-            }
-            Some(CoreResult::Ok(Message::Close(msg))) => {
-                info!("Message received on websocket channel, msg: {:?}", msg);
-            }
-            Some(CoreResult::Ok(Message::Frame(msg))) => {
-                info!("Message received on websocket channel, msg: {:?}", msg);
-            }
-            Some(Err(err)) => {
-                error!("Error received on websocket channel, msg: {:?}", err)
-                // Handle error
-            }
+            Some(_) => info!("Type not handled"),
             None => {
                 info!("Stream closed, cancelling session on client");
                 cancel_token.cancel();

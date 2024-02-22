@@ -1,13 +1,11 @@
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::broadcast::Receiver;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
 use tracing::error;
+use tracing::info;
 use tracing::warn;
 
 use super::web_client::WebClient;
@@ -25,7 +23,7 @@ pub(crate) struct MktData {
 
 impl MktData {
     pub fn new(client: Arc<WebClient>, cancel_token: CancellationToken) -> Self {
-        let mut receiver = client.get_mktdata_receiver();
+        let mut receiver = client.subscribe_to_events();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -62,7 +60,9 @@ impl MktData {
         self.event[symbol].clone()
     }
 
-    fn handle_msg(msg: String, cancel_token: &CancellationToken) {
-        if let Ok(msg) = serde_json::from_str::<tt_api::Event>(&msg) {}
+    fn handle_msg(msg: String, _cancel_token: &CancellationToken) {
+        // if let Ok(msg) = serde_json::from_str::<tt_api::Event>(&msg) {
+        //     info!("Last mktdata message received, msg: {:?}", msg);
+        // }
     }
 }
