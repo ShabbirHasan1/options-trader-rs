@@ -11,6 +11,7 @@ use tracing::warn;
 use crate::web_client::WebClient;
 
 use self::tt_api::OrderData;
+use super::web_client::sessions::acc_api;
 
 mod tt_api {
     use super::*;
@@ -45,14 +46,7 @@ mod tt_api {
         pub cancellable: bool,
         pub editable: bool,
         pub edited: bool,
-        pub legs: Option<Vec<Leg>>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct Payload {
-        #[serde(rename = "type")]
-        pub msg_type: String,
-        pub data: OrderData,
+        pub legs: Vec<Leg>,
     }
 }
 
@@ -96,9 +90,14 @@ impl Orders {
     }
 
     fn handle_msg(msg: String, _cancel_token: &CancellationToken) {
-        info!("msg received: {}", msg);
-        if let Ok(msg) = serde_json::from_str::<tt_api::Payload>(&msg) {
-            info!("Last mktdata message received, msg: {:?}", msg);
+        if let Ok(payload) = serde_json::from_str::<acc_api::Payload>(&msg) {
+            if payload.msg_type.ne("Order") {
+                return;
+            }
+            info!("msg received: {}", msg);
+            if let Ok(msg) = serde_json::from_str::<acc_api::Payload>(&msg) {
+                info!("Last mktdata message received, msg: {:?}", msg);
+            }
         }
     }
 }

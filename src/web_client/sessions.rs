@@ -165,10 +165,6 @@ impl WsSession for AccountSession {
         self.last_received = Utc::now();
     }
 
-    fn close(&mut self) {
-        self.close_session();
-    }
-
     fn handle_response<Session>(&mut self, response: String, cancel_token: CancellationToken)
     where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,

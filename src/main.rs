@@ -11,6 +11,7 @@ mod account;
 mod db_client;
 mod mktdata;
 mod orders;
+mod positions;
 mod settings;
 mod strategies;
 mod web_client;
@@ -104,7 +105,6 @@ async fn main() {
     let db = startup_db().await;
     let mut is_graceful_shutdown = false;
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
-    let mut receiver = web_client.subscribe_to_events();
     if let Err(err) = web_client.startup(ws_url, settings, &db).await {
         error!("Failed to startup web_client, error: {}, exiting app", err);
         std::process::exit(1);

@@ -192,22 +192,22 @@ impl WebClient {
 
         info!("Session token {}", self.session.clone());
 
-        let (to_ws, _) = broadcast::channel::<String>(100);
-        self.account_updates = Some(
-            self.subscribe_to_account_updates(
-                account_session_url,
-                &data.account.clone(),
-                &self.session.clone(),
-                to_ws,
-                self.cancel_token.clone(),
-            )
-            .await?,
-        );
+        // let (to_ws, _) = broadcast::channel::<String>(100);
+        // self.account_updates = Some(
+        //     self.subscribe_to_account_updates(
+        //         account_session_url,
+        //         &data.account.clone(),
+        //         &self.session.clone(),
+        //         to_ws,
+        //         self.cancel_token.clone(),
+        //     )
+        //     .await?,
+        // );
 
         Ok(())
     }
 
-    pub async fn get<Payload>(&self, endpoint: &str) -> Result<Payload>
+    pub async fn get<Response>(&self, endpoint: &str) -> Result<Response>
     where
         Response: Serialize + for<'a> Deserialize<'a>,
     {
