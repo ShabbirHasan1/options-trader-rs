@@ -53,22 +53,6 @@ impl HttpClient {
                 response.body_string().await
             );
         }
-        // if let Some(encoding) = response.header("content-encoding") {
-        //     if encoding.eq("gzip") {
-        //         let bytes = match response.body_bytes().await {
-        //             surf::Result::Ok(val) => val,
-        //             Err(err) => bail!("Could not read bytes body, error: {}", err),
-        //         };
-        //         let mut decoder = GzDecoder::new(&bytes[..]);
-        //         let mut output = String::new();
-        //         let _ = decoder.read_to_string(&mut output);
-        //         info!("POST Response body: {:?}", output);
-        //         match json_from_str::<Response>(&output) {
-        //             CoreResult::Ok(val) => return anyhow::Result::Ok(val),
-        //             Err(err) => bail!("Failed to extract data from gzip encoding, error: {}", err),
-        //         }
-        //     }
-        // }
 
         // info!("GET Response body: {:?}", response.body_string().await);
         // info!("GET Response body: {:?}", response);

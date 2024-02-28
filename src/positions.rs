@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+
 use anyhow::bail;
 use anyhow::Result;
 use chrono::NaiveDate;
 use serde::Deserialize;
 use serde::Serialize;
 
-mod tt_api {
+pub(crate) mod tt_api {
     use super::*;
 
     #[derive(Debug, Deserialize, Serialize)]
@@ -16,7 +18,7 @@ mod tt_api {
     #[derive(Clone, Debug, Deserialize, Serialize)]
     pub struct Positions {
         #[serde(rename = "items")]
-        pub Legs: Vec<Leg>,
+        pub legs: Vec<Leg>,
     }
 
     #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -261,7 +263,7 @@ impl<ST> OptionStrategy<ST> {
         }
     }
 
-    fn determine_strategy(symbols: &Vec<ST>, legs: &Vec<tt_api::Leg>) -> StrategyType
+    fn determine_strategy(symbols: &[ST], legs: &[tt_api::Leg]) -> StrategyType
     where
         ST: ComplexSymbol,
     {
@@ -272,7 +274,7 @@ impl<ST> OptionStrategy<ST> {
         }
     }
 
-    fn single_leg_strategies(symbols: &Vec<ST>) -> StrategyType
+    fn single_leg_strategies(symbols: &[ST]) -> StrategyType
     where
         ST: ComplexSymbol,
     {
@@ -282,7 +284,7 @@ impl<ST> OptionStrategy<ST> {
         }
     }
 
-    fn double_leg_strategies(symbols: &Vec<ST>) -> StrategyType
+    fn double_leg_strategies(symbols: &[ST]) -> StrategyType
     where
         ST: ComplexSymbol,
     {
