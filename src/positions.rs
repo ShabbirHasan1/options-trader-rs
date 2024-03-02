@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::iter::FromIterator;
 
 use anyhow::bail;
 use anyhow::Result;
@@ -105,7 +106,7 @@ impl OptionType {
     }
 }
 
-pub trait ComplexSymbol {
+pub trait ComplexSymbol: Send + Sync {
     fn symbol(&self) -> &str;
     fn expiration_date(&self) -> NaiveDate;
     fn option_type(&self) -> OptionType;
@@ -122,7 +123,7 @@ struct FutureOptionSymbol {
 }
 
 impl FutureOptionSymbol {
-    pub fn parse(symbol: &str) -> Result<FutureOptionSymbol> {
+    pub fn parse(symbol: &str) -> Result<Box<dyn ComplexSymbol>> {
         if symbol.len() < 20 || !symbol.starts_with("./") {
             bail!("Invalid format whilst parsing future option symbol");
         }
@@ -146,13 +147,13 @@ impl FutureOptionSymbol {
             Err(_) => bail!("Invalid strike price format"),
         };
 
-        Ok(FutureOptionSymbol {
+        Ok(Box::new(FutureOptionSymbol {
             future_contract_code,
             option_contract_code,
             expiration_date,
             option_type,
             strike_price,
-        })
+        }))
     }
 }
 
@@ -182,8 +183,18 @@ struct EquityOptionSymbol {
     strike_price: i32,
 }
 
+// and we'll implement IntoIterator
+impl IntoIterator for EquityOptionSymbol {
+    type Item = Box<dyn ComplexSymbol>;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_iter()
+    }
+}
+
 impl EquityOptionSymbol {
-    pub fn parse(symbol: &str) -> Result<EquityOptionSymbol> {
+    pub fn parse(symbol: &str) -> Result<Box<dyn ComplexSymbol>> {
         if symbol.len() != 20 {
             bail!("Invalid format whilst parsing equity option symbol");
         }
@@ -201,12 +212,12 @@ impl EquityOptionSymbol {
             Err(_) => bail!("Invalid strike price format"),
         };
 
-        Ok(EquityOptionSymbol {
+        Ok(Box::new(EquityOptionSymbol {
             symbol,
             expiration_date,
             option_type,
             strike_price,
-        })
+        }))
     }
 }
 
@@ -244,29 +255,43 @@ impl InstrumentType {
     }
 }
 
-pub struct OptionStrategy<ST> {
-    symbols: Vec<ST>,
-    strategy_type: StrategyType,
-    legs: Vec<tt_api::Leg>,
+pub struct OptionStrategy {
+    pub legs: Vec<Box<dyn ComplexSymbol>>,
+    pub strategy_type: StrategyType,
 }
 
-impl<ST> OptionStrategy<ST> {
-    pub fn new(symbols: Vec<ST>, legs: Vec<tt_api::Leg>) -> OptionStrategy<ST>
-    where
-        ST: ComplexSymbol,
-    {
+impl OptionStrategy {
+    pub fn new(legs: Vec<tt_api::Leg>) -> OptionStrategy {
+        let symbols = Self::parse_complex_symbols(&legs);
         let strategy_type = Self::determine_strategy(&symbols, &legs);
         Self {
-            symbols,
+            legs: symbols,
             strategy_type,
-            legs,
         }
     }
 
-    fn determine_strategy(symbols: &[ST], legs: &[tt_api::Leg]) -> StrategyType
-    where
-        ST: ComplexSymbol,
-    {
+    fn parse_complex_symbols(legs: &[tt_api::Leg]) -> Vec<Box<dyn ComplexSymbol>> {
+        let symbols =
+            legs.into_iter()
+                .map(|leg| {
+                    match InstrumentType::get_symbol_type(
+                        leg.instrument_type.as_ref().unwrap().as_str(),
+                    ) {
+                        InstrumentType::Equity => EquityOptionSymbol::parse(&leg.symbol).unwrap()
+                            as Box<dyn ComplexSymbol>,
+                        InstrumentType::Future => FutureOptionSymbol::parse(&leg.symbol).unwrap()
+                            as Box<dyn ComplexSymbol>,
+                    }
+                })
+                .collect();
+
+        symbols
+    }
+
+    fn determine_strategy(
+        symbols: &[Box<dyn ComplexSymbol>],
+        legs: &[tt_api::Leg],
+    ) -> StrategyType {
         match legs.len() {
             1 => Self::single_leg_strategies(symbols),
             2 => Self::double_leg_strategies(symbols),
@@ -274,20 +299,14 @@ impl<ST> OptionStrategy<ST> {
         }
     }
 
-    fn single_leg_strategies(symbols: &[ST]) -> StrategyType
-    where
-        ST: ComplexSymbol,
-    {
+    fn single_leg_strategies(symbols: &[Box<dyn ComplexSymbol>]) -> StrategyType {
         match symbols[0].option_type() {
             OptionType::Call => StrategyType::Call,
             OptionType::Put => StrategyType::Put,
         }
     }
 
-    fn double_leg_strategies(symbols: &[ST]) -> StrategyType
-    where
-        ST: ComplexSymbol,
-    {
+    fn double_leg_strategies(symbols: &[Box<dyn ComplexSymbol>]) -> StrategyType {
         if symbols[0].expiration_date() == symbols[1].expiration_date() {
             return StrategyType::CreditSpread;
         }
