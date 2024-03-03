@@ -104,7 +104,7 @@ impl<Session> WebSocketClient<Session> {
                                 cancel_token.cancel();
                             }
                             std::result::Result::Ok(val) => {
-                                info!("Sending payload {}", val);
+                                debug!("Sending payload {}", val);
                                 let _ = write.send(Message::Text(val)).await;
                             }
                         };
@@ -153,7 +153,7 @@ impl<Session> WebSocketClient<Session> {
         Payload: Serialize + for<'a> Deserialize<'a>,
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
-        let output = format!("to websocket sending payload: {}", to_json(&payload)?);
+        let output = format!("{}", to_json(&payload)?);
         info!("Sending to websocket: {}", output);
         match self.session.read().await.to_ws().send(to_json(&payload)?) {
             Err(err) => anyhow::bail!("Error sending payload to websocket stream, error: {}", err),

@@ -6,6 +6,7 @@ use serde::Serialize;
 use serde_json::to_string as to_json;
 use surf::Client;
 use surf::RequestBuilder;
+use tracing::debug;
 use tracing::info;
 use url::Url;
 
@@ -54,8 +55,7 @@ impl HttpClient {
             );
         }
 
-        // info!("GET Response body: {:?}", response.body_string().await);
-        // info!("GET Response body: {:?}", response);
+        debug!("GET Response body: {:?}", response);
         match response.body_json::<Response>().await {
             surf::Result::Ok(val) => Ok(val),
             Err(err) => bail!(
@@ -97,7 +97,7 @@ impl HttpClient {
             bail!("POST Request failed with status: {}", response.status());
         }
 
-        info!("POST Response body: {:?}", response);
+        debug!("POST Response body: {:?}", response);
         match response.body_json::<Response>().await {
             surf::Result::Ok(val) => Ok(val),
             Err(err) => bail!("Could not read json body, error: {}", err),

@@ -359,6 +359,7 @@ impl OptionStrategy {
         match legs.len() {
             1 => Self::single_leg_strategies(symbols),
             2 => Self::double_leg_strategies(symbols),
+            4 => StrategyType::IronCondor,
             _ => StrategyType::Other,
         }
     }
@@ -371,14 +372,16 @@ impl OptionStrategy {
     }
 
     fn double_leg_strategies(symbols: &[Box<dyn ComplexSymbol>]) -> StrategyType {
-        if symbols[0].expiration_date() == symbols[1].expiration_date() {
+        let leg1 = &symbols[0];
+        let leg2 = &symbols[1];
+
+        if leg1.expiration_date() == leg2.expiration_date() {
             return StrategyType::CreditSpread;
         }
 
-        if symbols[0].strike_price() == symbols[1].strike_price() {
+        if leg1.strike_price() == leg2.strike_price() {
             return StrategyType::CalendarSpread;
         }
-
         StrategyType::Other
     }
 }

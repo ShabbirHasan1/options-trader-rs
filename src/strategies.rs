@@ -12,6 +12,8 @@ use tracing::info;
 use tracing::warn;
 
 use crate::positions::tt_api;
+use crate::positions::OptionType;
+use crate::positions::StrategyType;
 
 use super::account::Account;
 use super::mktdata::MktData;
@@ -37,11 +39,112 @@ impl CreditSpread {
 }
 impl fmt::Display for CreditSpread {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CreditSpread: [{}]", &self.position)
+        write!(
+            f,
+            "CreditSpread {}: [{}\n]",
+            &self.position.legs.first().unwrap().underlying(),
+            &self.position
+        )
     }
 }
 
 impl Strategy for CreditSpread {
+    fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
+        if let Some(leg) = self.position.legs.first() {
+            let snapshot = mktdata.get_snapshot(leg.symbol());
+            // if let Some(delta) = snapshot.delta {
+            //     if leg.delta > 40 {
+            //         return anyhow::Ok(true);
+            //     }
+            // }
+
+            // if orders.get_order().premimum % 2 < orders.orders.get_order().pnl {
+            //     return true;
+            // }
+
+            return anyhow::Ok(false);
+        }
+        bail!("Something went wrong building the positions")
+    }
+
+    fn get_symbol(&self) -> &str {
+        self.position.legs.first().unwrap().symbol()
+    }
+
+    fn print(&self) {
+        info!("{}", &self);
+    }
+}
+
+struct CalendarSpread {
+    position: OptionStrategy,
+}
+
+impl CalendarSpread {
+    fn new(position: OptionStrategy) -> Self {
+        Self { position }
+    }
+}
+impl fmt::Display for CalendarSpread {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "CalendarSpread {}: [{}\n]",
+            &self.position.legs.first().unwrap().underlying(),
+            &self.position
+        )
+    }
+}
+
+impl Strategy for CalendarSpread {
+    fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
+        if let Some(leg) = self.position.legs.first() {
+            let snapshot = mktdata.get_snapshot(leg.symbol());
+            // if let Some(delta) = snapshot.delta {
+            //     if leg.delta > 40 {
+            //         return anyhow::Ok(true);
+            //     }
+            // }
+
+            // if orders.get_order().premimum % 2 < orders.orders.get_order().pnl {
+            //     return true;
+            // }
+
+            return anyhow::Ok(false);
+        }
+        bail!("Something went wrong building the positions")
+    }
+
+    fn get_symbol(&self) -> &str {
+        self.position.legs.first().unwrap().symbol()
+    }
+
+    fn print(&self) {
+        info!("{}", &self);
+    }
+}
+
+struct IronCondor {
+    position: OptionStrategy,
+}
+
+impl IronCondor {
+    fn new(position: OptionStrategy) -> Self {
+        Self { position }
+    }
+}
+impl fmt::Display for IronCondor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "IronCondor {}: [{}\n]",
+            &self.position.legs.first().unwrap().underlying(),
+            &self.position
+        )
+    }
+}
+
+impl Strategy for IronCondor {
     fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
         if let Some(leg) = self.position.legs.first() {
             let snapshot = mktdata.get_snapshot(leg.symbol());
@@ -157,9 +260,7 @@ impl Strategies {
         Ok(Self::convert_api_data_into_strategies(positions.data.legs).await)
     }
 
-    async fn convert_api_data_into_strategies<'a>(
-        legs: Vec<tt_api::Leg>,
-    ) -> Vec<Box<dyn Strategy>> {
+    async fn convert_api_data_into_strategies(legs: Vec<tt_api::Leg>) -> Vec<Box<dyn Strategy>> {
         let mut sorted_legs: HashMap<String, Vec<tt_api::Leg>> = HashMap::new();
 
         legs.iter().for_each(|leg| {
@@ -171,7 +272,19 @@ impl Strategies {
             .values()
             .map(|legs| {
                 let spread = OptionStrategy::new(legs.clone());
-                Box::new(CreditSpread::new(spread)) as Box<dyn Strategy>
+
+                match &spread.strategy_type {
+                    StrategyType::CreditSpread => {
+                        Box::new(CreditSpread::new(spread)) as Box<dyn Strategy>
+                    }
+                    StrategyType::CalendarSpread => {
+                        Box::new(CalendarSpread::new(spread)) as Box<dyn Strategy>
+                    }
+                    StrategyType::IronCondor => {
+                        Box::new(IronCondor::new(spread)) as Box<dyn Strategy>
+                    }
+                    _ => Box::new(CreditSpread::new(spread)) as Box<dyn Strategy>,
+                }
             })
             .collect();
 
