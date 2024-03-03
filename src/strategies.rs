@@ -1,6 +1,7 @@
 use anyhow::bail;
 use anyhow::Result;
 use std::collections::HashMap;
+use std::fmt;
 use std::iter::Iterator;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +23,7 @@ use super::web_client::WebClient;
 trait Strategy: Sync + Send {
     fn should_exit(&self, mktdata: &MktData) -> Result<bool>;
     fn get_symbol(&self) -> &str;
+    fn print(&self);
 }
 
 struct CreditSpread {
@@ -33,13 +35,20 @@ impl CreditSpread {
         Self { position }
     }
 }
+impl fmt::Display for CreditSpread {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CreditSpread: [{}]", &self.position)
+    }
+}
 
 impl Strategy for CreditSpread {
     fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
         if let Some(leg) = self.position.legs.first() {
             let snapshot = mktdata.get_snapshot(leg.symbol());
-            // if leg.delta > leg.delta + 15 {
-            //     return Ok(true);
+            // if let Some(delta) = snapshot.delta {
+            //     if leg.delta > 40 {
+            //         return anyhow::Ok(true);
+            //     }
             // }
 
             // if orders.get_order().premimum % 2 < orders.orders.get_order().pnl {
@@ -53,6 +62,10 @@ impl Strategy for CreditSpread {
 
     fn get_symbol(&self) -> &str {
         self.position.legs.first().unwrap().symbol()
+    }
+
+    fn print(&self) {
+        info!("{}", &self);
     }
 }
 
@@ -78,9 +91,6 @@ impl Strategies {
                     _ = cancel_token.cancelled() => {
                         break
                     }
-                    _ = sleep(Duration::from_secs(5)) => {
-                        strategies.iter().for_each(|strategy| Self::check_stops(&strategy, &mktdata, &orders));
-                    }
                     _ = sleep(Duration::from_secs(30)) => {
                         strategies = match Self::get_strategies(&web_client).await {
                             Ok(val) => {
@@ -93,6 +103,9 @@ impl Strategies {
                                 break
                             }
                         }
+                    }
+                    _ = sleep(Duration::from_secs(5)) => {
+                        strategies.iter().for_each(|strategy| Self::check_stops(&strategy, &mktdata, &orders));
                     }
                     _ = cancel_token.cancelled() => {
                         break
@@ -154,7 +167,7 @@ impl Strategies {
             sorted_legs.entry(underlying).or_default().push(leg.clone());
         });
 
-        let strats = sorted_legs
+        let strats: Vec<Box<dyn Strategy>> = sorted_legs
             .values()
             .map(|legs| {
                 let spread = OptionStrategy::new(legs.clone());
@@ -162,6 +175,7 @@ impl Strategies {
             })
             .collect();
 
+        strats.iter().for_each(|strategy| strategy.print());
         strats
     }
 }

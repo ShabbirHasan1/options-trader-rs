@@ -169,19 +169,26 @@ impl WsSession for AccountSession {
     where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
-        debug!("Response on account session, msg: {}", response);
+        debug!(
+            "[Account Session] response on account session, msg: {}",
+            response
+        );
         if let Ok(response) = serde_json::from_str::<acc_api::Response>(&response) {
             if response.status.eq("ok") {
                 match response.action.as_str() {
                     "connect" => {
+                        info!("[Account Session] connect response {:?}", response);
                         self.handle_connect(response.websocket_session_id.clone());
                     }
-                    "heartbeat" => self.handle_heartbeat(),
+                    "heartbeat" => {
+                        info!("[Account Session] heartbeat response {:?}", response);
+                        self.handle_heartbeat();
+                    }
                     _ => info!("Here, {:?}", response),
                 };
             } else {
                 error!(
-                    "Failed to connect to stream, action: {}, status: {}",
+                    "[Account Session] Failed to connect to stream, action: {}, status: {}",
                     response.action, response.status
                 );
                 cancel_token.cancel()
@@ -246,6 +253,7 @@ pub(crate) mod md_api {
         pub symbol: String,
         #[serde(rename = "type")]
         pub msg_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub from_time: Option<i64>,
     }
 
@@ -262,7 +270,7 @@ pub(crate) mod md_api {
     }
 
     #[derive(Clone, Default, Debug, Serialize, Deserialize)]
-    pub struct Heartbeat {
+    pub struct ChannelResponse {
         #[serde(rename = "type")]
         pub msg_type: String,
         pub channel: u64,
@@ -322,7 +330,7 @@ impl MktdataSession {
             to_app,
             channels: Vec::default(),
             is_alive: false,
-            heartbeat_interval: 30,
+            heartbeat_interval: 60,
         }))
     }
 
@@ -354,13 +362,13 @@ impl MktdataSession {
     pub fn subscribe(&mut self, symbol: &str) -> md_api::Channel {
         let mut parameters = HashMap::new();
         parameters.insert("contract".to_string(), "AUTO".to_string());
+        self.channels.push(symbol.to_string());
         let message = md_api::Channel {
             msg_type: "CHANNEL_REQUEST".to_string(),
             channel: self.channels.len() as i64,
             service: "FEED".to_string(),
             parameters,
         };
-        self.channels.push(symbol.to_string());
         message
     }
 
@@ -403,7 +411,7 @@ impl WsSession for MktdataSession {
     }
 
     fn get_heart_beat_message(&self) -> String {
-        let heartbeat = md_api::Heartbeat {
+        let heartbeat = md_api::ChannelResponse {
             msg_type: "KEEPALIVE".to_string(),
             channel: 0,
         };
@@ -419,23 +427,26 @@ impl WsSession for MktdataSession {
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
         if let Ok(response) = serde_json::from_str::<md_api::AuthState>(&response) {
-            info!("connection response auth state: {:?}", response);
+            info!(
+                "[MktData Session] connection response auth state: {:?}",
+                response
+            );
             if let Some(auth) = self.handle_auth(response) {
                 self.handle_connect();
                 info!("sending auth request: {:?}", auth);
                 let _ = self.to_ws.send(to_json(&auth).unwrap()).unwrap();
             }
-        } else if let Ok(response) = serde_json::from_str::<md_api::Heartbeat>(&response) {
-            info!("heartbeat response {:?}", response);
-            self.handle_heartbeat();
-        } else if let Ok(response) = serde_json::from_str::<md_api::Channel>(&response) {
-            info!("channel response {:?}", response);
-            if response.msg_type.eq("CHANNEL_OPENED") {
+        } else if let Ok(response) = serde_json::from_str::<md_api::ChannelResponse>(&response) {
+            if response.msg_type.eq("KEEPALIVE") {
+                info!("[MktData Session] heartbeat {:?}", response);
+                self.handle_heartbeat();
+            } else if response.msg_type.eq("CHANNEL_OPENED") {
+                info!("[MktData Session] Channel session {:?}", response);
                 let channel = response.channel;
                 let symbol = self.channels[channel as usize].to_string();
                 let subscription = md_api::FeedSubscription {
                     msg_type: "FEED_SUBSCRIPTION".to_string(),
-                    channel,
+                    channel: channel as i64,
                     add: vec![AddItem {
                         symbol,
                         msg_type: "Candle".to_string(),
@@ -444,6 +455,8 @@ impl WsSession for MktdataSession {
                 };
                 let _ = self.to_ws.send(to_json(&subscription).unwrap()).unwrap();
             }
+        } else if let Ok(response) = serde_json::from_str::<md_api::Channel>(&response) {
+            info!("[MktData Session] channel response {:?}", response);
         } else {
             let _ = self.to_app.send(response);
         }

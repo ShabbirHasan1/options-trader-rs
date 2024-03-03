@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::iter::FromIterator;
 
 use anyhow::bail;
@@ -97,6 +98,20 @@ pub enum OptionType {
     Put,
 }
 
+impl fmt::Display for OptionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match &self {
+                OptionType::Call => "Call",
+                OptionType::Put => "Put",
+                _ => panic!("Unknown option type"),
+            }
+        )
+    }
+}
+
 impl OptionType {
     pub fn parse(option_type: char) -> OptionType {
         match option_type {
@@ -113,6 +128,13 @@ pub trait ComplexSymbol: Send + Sync {
     fn expiration_date(&self) -> NaiveDate;
     fn option_type(&self) -> OptionType;
     fn strike_price(&self) -> f64;
+    fn print(&self) -> String;
+}
+
+impl fmt::Display for dyn ComplexSymbol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "\nLeg {}", self.print())
+    }
 }
 
 #[derive(Debug)]
@@ -170,6 +192,13 @@ impl FutureOptionSymbol {
 }
 
 impl ComplexSymbol for FutureOptionSymbol {
+    fn print(&self) -> String {
+        format!(
+            "symbol: {}, underlying: {}, expiration: {}, type:{}, strike: {}",
+            self.symbol, self.underlying, self.expiration_date, self.option_type, self.strike_price
+        )
+    }
+
     fn symbol(&self) -> &str {
         &self.symbol
     }
@@ -238,6 +267,13 @@ impl EquityOptionSymbol {
 }
 
 impl ComplexSymbol for EquityOptionSymbol {
+    fn print(&self) -> String {
+        format!(
+            "symbol: {}, underlying: {}, expiration: {}, type:{}, strike: {}",
+            self.symbol, self.underlying, self.expiration_date, self.option_type, self.strike_price
+        )
+    }
+
     fn symbol(&self) -> &str {
         &self.symbol
     }
@@ -278,6 +314,14 @@ impl InstrumentType {
 pub struct OptionStrategy {
     pub legs: Vec<Box<dyn ComplexSymbol>>,
     pub strategy_type: StrategyType,
+}
+
+impl fmt::Display for OptionStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let leg_strings: Vec<String> = self.legs.iter().map(|leg| format!("{}", leg)).collect();
+        let concatenated_legs = leg_strings.join(", ");
+        write!(f, "{}", concatenated_legs)
+    }
 }
 
 impl OptionStrategy {

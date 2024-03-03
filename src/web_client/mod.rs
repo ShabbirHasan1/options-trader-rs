@@ -180,29 +180,29 @@ impl WebClient {
         self.session = updates.data.session;
         self.account = data.account.clone();
 
-        // let api_quote_token = self
-        //     .get_api_quote_token(&self.http_client, &self.session)
-        //     .await?;
+        let api_quote_token = self
+            .get_api_quote_token(&self.http_client, &self.session)
+            .await?;
 
-        // let (to_ws, _) = broadcast::channel::<String>(100);
-        // self.mktdata = Some(
-        //     self.subscribe_to_mktdata(api_quote_token, to_ws, self.cancel_token.clone())
-        //         .await?,
-        // );
+        let (to_ws, _) = broadcast::channel::<String>(100);
+        self.mktdata = Some(
+            self.subscribe_to_mktdata(api_quote_token, to_ws, self.cancel_token.clone())
+                .await?,
+        );
 
         info!("Session token {}", self.session.clone());
 
-        // let (to_ws, _) = broadcast::channel::<String>(100);
-        // self.account_updates = Some(
-        //     self.subscribe_to_account_updates(
-        //         account_session_url,
-        //         &data.account.clone(),
-        //         &self.session.clone(),
-        //         to_ws,
-        //         self.cancel_token.clone(),
-        //     )
-        //     .await?,
-        // );
+        let (to_ws, _) = broadcast::channel::<String>(100);
+        self.account_updates = Some(
+            self.subscribe_to_account_updates(
+                account_session_url,
+                &data.account.clone(),
+                &self.session.clone(),
+                to_ws,
+                self.cancel_token.clone(),
+            )
+            .await?,
+        );
 
         Ok(())
     }
@@ -221,12 +221,10 @@ impl WebClient {
     }
 
     pub async fn subscribe_to_symbol(&self, symbol: &str) -> Result<()> {
-        if let Some(mktdata) = &self.mktdata {
-            let session = mktdata.get_session();
-            let subscribe = session.write().await.subscribe(symbol);
-            let _ = mktdata.send_message::<md_api::Channel>(subscribe).await;
-        }
-        bail!("System not ready, call startup first");
+        let mktdata = self.mktdata.as_ref().unwrap();
+        let session = mktdata.get_session();
+        let subscribe = session.write().await.subscribe(symbol);
+        mktdata.send_message::<md_api::Channel>(subscribe).await
     }
 
     async fn fetch_auth_from_db(

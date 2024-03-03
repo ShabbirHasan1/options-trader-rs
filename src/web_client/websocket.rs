@@ -97,7 +97,6 @@ impl<Session> WebSocketClient<Session> {
                         Self::handle_socket_messages(msg, session.clone(), cancel_token.clone()).await;
                     }
                     msg = to_ws.recv() => {
-                        info!("Sending to ws {:?}", msg);
                         match msg {
                             Err(RecvError::Lagged(err)) => warn!("Publisher channel skipping a number of messages: {}", err),
                             Err(RecvError::Closed) => {
@@ -105,7 +104,7 @@ impl<Session> WebSocketClient<Session> {
                                 cancel_token.cancel();
                             }
                             std::result::Result::Ok(val) => {
-                                debug!("Sending payload {}", val);
+                                info!("Sending payload {}", val);
                                 let _ = write.send(Message::Text(val)).await;
                             }
                         };
@@ -113,7 +112,6 @@ impl<Session> WebSocketClient<Session> {
                     _ = sleep(Duration::from_secs(1)) => {
                         if Self::should_send_heartbeat(heartbeat_interval, &session, &cancel_token).await {
                             let heartbeat = session.read().await.get_heart_beat_message();
-                            info!("Sending heartbeat");
                             if write.send(Message::Text(heartbeat)).await.is_ok() {
                                 session.write().await.update_last_sent();
                             }
@@ -141,7 +139,7 @@ impl<Session> WebSocketClient<Session> {
             return false;
         }
         let now = Utc::now();
-        if session.last_received() + Duration::from_secs(interval * 2) < now {
+        if session.last_received() + Duration::from_millis(interval * 1200) < now {
             error!("Heartbeat response not received in the last minute, forcing a restart");
             cancel_token.cancel();
             false
