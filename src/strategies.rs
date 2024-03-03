@@ -48,7 +48,7 @@ impl Strategy for CreditSpread {
 
             return anyhow::Ok(false);
         }
-        bail!("Safe")
+        bail!("Something went wrong building the positions")
     }
 
     fn get_symbol(&self) -> &str {
@@ -63,13 +63,16 @@ impl Strategies {
         let _account = Account::new(Arc::clone(&web_client), cancel_token.clone());
         let mktdata = MktData::new(Arc::clone(&web_client), cancel_token.clone());
         let orders = Orders::new(Arc::clone(&web_client), cancel_token.clone());
-        tokio::spawn(async move {
-            let mut strategies = match Self::get_strategies(&web_client).await {
-                Ok(val) => val,
-                Err(err) => panic!("Failed to pull stragies on initialisation, error: {}", err),
-            };
+        let mut strategies = match Self::get_strategies(&web_client).await {
+            Ok(val) => val,
+            Err(err) => bail!(
+                "Failed to pull strategies on initialisation, error: {}",
+                err
+            ),
+        };
+        Self::subscribe_to_updates(&strategies, &mktdata, &cancel_token).await;
 
-            Self::subscribe_to_updates(&strategies, &mktdata, &cancel_token).await;
+        tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {

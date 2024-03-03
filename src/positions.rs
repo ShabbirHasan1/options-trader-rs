@@ -6,6 +6,7 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use serde::Deserialize;
 use serde::Serialize;
+use tracing::info;
 
 pub(crate) mod tt_api {
     use super::*;
@@ -108,58 +109,73 @@ impl OptionType {
 
 pub trait ComplexSymbol: Send + Sync {
     fn symbol(&self) -> &str;
+    fn underlying(&self) -> &str;
     fn expiration_date(&self) -> NaiveDate;
     fn option_type(&self) -> OptionType;
-    fn strike_price(&self) -> i32;
+    fn strike_price(&self) -> f64;
 }
 
 #[derive(Debug)]
 struct FutureOptionSymbol {
-    future_contract_code: String,
-    option_contract_code: String,
+    symbol: String,
+    underlying: String,
     expiration_date: NaiveDate,
     option_type: OptionType,
-    strike_price: i32,
+    strike_price: f64,
+    current_price: f64,
+    quantity: i32,
 }
 
 impl FutureOptionSymbol {
     pub fn parse(symbol: &str) -> Result<Box<dyn ComplexSymbol>> {
         if symbol.len() < 20 || !symbol.starts_with("./") {
-            bail!("Invalid format whilst parsing future option symbol");
+            bail!(
+                "Invalid format whilst parsing future option symbol: {} len: {}",
+                symbol,
+                symbol.len()
+            );
         }
 
         let parts: Vec<&str> = symbol[2..].split_whitespace().collect();
-        if parts.len() != 5 {
-            bail!("Invalid number of tokens parsing future option symbol");
+        if parts.len() != 3 {
+            bail!(
+                "Invalid number of tokens parsing future option symbol: {} tokens: {}",
+                symbol,
+                parts.len()
+            );
         }
 
-        let future_contract_code = parts[0].to_string();
-        let option_contract_code = parts[1].to_string();
-        let expiration_date = match NaiveDate::parse_from_str(parts[2], "%Y%m%d") {
+        let underlying = parts[0].to_string();
+        let expiration_date = match NaiveDate::parse_from_str(&parts[2][..6], "%y%m%d") {
             Ok(val) => val,
-            _ => bail!("Failed to parse date"),
+            Err(err) => bail!("Failed to parse date: {}, error: {}", parts[2], err),
         };
-        let option_type = OptionType::parse(parts[3].chars().next().unwrap());
+        let option_type = OptionType::parse(parts[2].chars().nth(6).unwrap());
 
-        let strike_price_str = parts[4].trim_start_matches('0');
-        let strike_price = match strike_price_str.parse::<f64>() {
-            Ok(strike) => (strike * 1000.0) as i32,
+        let strike_price = match format!("{}", &parts[2][7..]).parse::<f64>() {
+            Ok(strike) => strike.round(),
             Err(_) => bail!("Invalid strike price format"),
         };
 
         Ok(Box::new(FutureOptionSymbol {
-            future_contract_code,
-            option_contract_code,
+            symbol: symbol.to_string(),
+            underlying: underlying.to_string(),
             expiration_date,
             option_type,
             strike_price,
+            current_price: 0.0,
+            quantity: 0,
         }))
     }
 }
 
 impl ComplexSymbol for FutureOptionSymbol {
     fn symbol(&self) -> &str {
-        &self.option_contract_code
+        &self.symbol
+    }
+
+    fn underlying(&self) -> &str {
+        &self.underlying
     }
 
     fn expiration_date(&self) -> NaiveDate {
@@ -170,7 +186,7 @@ impl ComplexSymbol for FutureOptionSymbol {
         self.option_type
     }
 
-    fn strike_price(&self) -> i32 {
+    fn strike_price(&self) -> f64 {
         self.strike_price
     }
 }
@@ -178,45 +194,45 @@ impl ComplexSymbol for FutureOptionSymbol {
 #[derive(Debug)]
 struct EquityOptionSymbol {
     symbol: String,
+    underlying: String,
     expiration_date: NaiveDate,
     option_type: OptionType,
-    strike_price: i32,
-}
-
-// and we'll implement IntoIterator
-impl IntoIterator for EquityOptionSymbol {
-    type Item = Box<dyn ComplexSymbol>;
-    type IntoIter = std::vec::IntoIter<Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.into_iter()
-    }
+    strike_price: f64,
+    current_price: f64,
+    quantity: i32,
 }
 
 impl EquityOptionSymbol {
     pub fn parse(symbol: &str) -> Result<Box<dyn ComplexSymbol>> {
-        if symbol.len() != 20 {
-            bail!("Invalid format whilst parsing equity option symbol");
+        if symbol.len() != 21 {
+            bail!(
+                "Invalid format whilst parsing equity option symbol: {}, len: {}",
+                symbol,
+                symbol.len()
+            );
         }
 
-        let symbol = symbol[0..6].trim().to_string();
-        let expiration_date = match NaiveDate::parse_from_str(&symbol[6..12], "%Y%m%d") {
+        let underlying = symbol[0..6].trim().to_string();
+        let expiration_date = match NaiveDate::parse_from_str(&symbol[6..12], "%y%m%d") {
             Ok(val) => val,
-            _ => bail!("Failed to parse date"),
+            Err(err) => bail!("Failed to parse date: {}, error: {}", &symbol[6..12], err),
         };
         let option_type = OptionType::parse(symbol.chars().nth(12).unwrap());
 
         let strike_price_str = symbol[13..].trim_start_matches('0');
         let strike_price = match strike_price_str.parse::<f64>() {
-            Ok(strike) => (strike * 1000.0) as i32,
+            Ok(strike) => (strike / 1000.0),
             Err(_) => bail!("Invalid strike price format"),
         };
 
         Ok(Box::new(EquityOptionSymbol {
-            symbol,
+            symbol: symbol.to_string(),
+            underlying,
             expiration_date,
             option_type,
             strike_price,
+            current_price: 0.0,
+            quantity: 0,
         }))
     }
 }
@@ -226,6 +242,10 @@ impl ComplexSymbol for EquityOptionSymbol {
         &self.symbol
     }
 
+    fn underlying(&self) -> &str {
+        &self.underlying
+    }
+
     fn expiration_date(&self) -> NaiveDate {
         self.expiration_date
     }
@@ -234,7 +254,7 @@ impl ComplexSymbol for EquityOptionSymbol {
         self.option_type
     }
 
-    fn strike_price(&self) -> i32 {
+    fn strike_price(&self) -> f64 {
         self.strike_price
     }
 }
@@ -272,7 +292,7 @@ impl OptionStrategy {
 
     fn parse_complex_symbols(legs: &[tt_api::Leg]) -> Vec<Box<dyn ComplexSymbol>> {
         let symbols =
-            legs.into_iter()
+            legs.iter()
                 .map(|leg| {
                     match InstrumentType::get_symbol_type(
                         leg.instrument_type.as_ref().unwrap().as_str(),
