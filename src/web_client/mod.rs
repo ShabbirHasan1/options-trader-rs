@@ -221,10 +221,8 @@ impl WebClient {
     }
 
     pub async fn subscribe_to_symbol(&self, symbol: &str) -> Result<()> {
-        let mktdata = self.mktdata.as_ref().unwrap();
-        let session = mktdata.get_session();
-        let subscribe = session.write().await.subscribe(symbol);
-        mktdata.send_message::<md_api::Channel>(subscribe).await
+        let client = self.mktdata.as_ref().unwrap();
+        client.get_session().write().await.subscribe(Some(symbol))
     }
 
     async fn fetch_auth_from_db(

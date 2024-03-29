@@ -127,6 +127,7 @@ pub trait ComplexSymbol: Send + Sync {
     fn underlying(&self) -> &str;
     fn expiration_date(&self) -> NaiveDate;
     fn option_type(&self) -> OptionType;
+    fn instrument_type(&self) -> InstrumentType;
     fn strike_price(&self) -> f64;
     fn print(&self) -> String;
 }
@@ -215,6 +216,10 @@ impl ComplexSymbol for FutureOptionSymbol {
         self.option_type
     }
 
+    fn instrument_type(&self) -> InstrumentType {
+        InstrumentType::Future
+    }
+
     fn strike_price(&self) -> f64 {
         self.strike_price
     }
@@ -288,6 +293,10 @@ impl ComplexSymbol for EquityOptionSymbol {
 
     fn option_type(&self) -> OptionType {
         self.option_type
+    }
+
+    fn instrument_type(&self) -> InstrumentType {
+        InstrumentType::Equity
     }
 
     fn strike_price(&self) -> f64 {
