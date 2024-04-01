@@ -98,6 +98,22 @@ pub enum OptionType {
     Put,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Direction {
+    Long,
+    Short,
+}
+
+impl Direction {
+    pub fn parse(direction: &str) -> Direction {
+        match direction {
+            "Long" => Direction::Long,
+            "Short" => Direction::Short,
+            _ => panic!("Unknown option type"),
+        }
+    }
+}
+
 impl fmt::Display for OptionType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -124,6 +140,7 @@ impl OptionType {
 
 pub trait ComplexSymbol: Send + Sync {
     fn symbol(&self) -> &str;
+    fn direction(&self) -> Direction;
     fn underlying(&self) -> &str;
     fn expiration_date(&self) -> NaiveDate;
     fn option_type(&self) -> OptionType;
@@ -143,6 +160,7 @@ struct FutureOptionSymbol {
     symbol: String,
     underlying: String,
     expiration_date: NaiveDate,
+    direction: Direction,
     option_type: OptionType,
     strike_price: f64,
     current_price: f64,
@@ -150,7 +168,7 @@ struct FutureOptionSymbol {
 }
 
 impl FutureOptionSymbol {
-    pub fn parse(symbol: &str) -> Result<Box<dyn ComplexSymbol>> {
+    pub fn parse(symbol: &str, direction: &str) -> Result<Box<dyn ComplexSymbol>> {
         if symbol.len() < 20 || !symbol.starts_with("./") {
             bail!(
                 "Invalid format whilst parsing future option symbol: {} len: {}",
@@ -184,6 +202,7 @@ impl FutureOptionSymbol {
             symbol: symbol.to_string(),
             underlying: underlying.to_string(),
             expiration_date,
+            direction: Direction::parse(direction),
             option_type,
             strike_price,
             current_price: 0.0,
@@ -212,6 +231,10 @@ impl ComplexSymbol for FutureOptionSymbol {
         self.expiration_date
     }
 
+    fn direction(&self) -> Direction {
+        self.direction
+    }
+
     fn option_type(&self) -> OptionType {
         self.option_type
     }
@@ -230,6 +253,7 @@ struct EquityOptionSymbol {
     symbol: String,
     underlying: String,
     expiration_date: NaiveDate,
+    direction: Direction,
     option_type: OptionType,
     strike_price: f64,
     current_price: f64,
@@ -237,7 +261,7 @@ struct EquityOptionSymbol {
 }
 
 impl EquityOptionSymbol {
-    pub fn parse(symbol: &str) -> Result<Box<dyn ComplexSymbol>> {
+    pub fn parse(symbol: &str, direction: &str) -> Result<Box<dyn ComplexSymbol>> {
         if symbol.len() != 21 {
             bail!(
                 "Invalid format whilst parsing equity option symbol: {}, len: {}",
@@ -263,6 +287,7 @@ impl EquityOptionSymbol {
             symbol: symbol.to_string(),
             underlying,
             expiration_date,
+            direction: Direction::parse(direction),
             option_type,
             strike_price,
             current_price: 0.0,
@@ -289,6 +314,10 @@ impl ComplexSymbol for EquityOptionSymbol {
 
     fn expiration_date(&self) -> NaiveDate {
         self.expiration_date
+    }
+
+    fn direction(&self) -> Direction {
+        self.direction
     }
 
     fn option_type(&self) -> OptionType {
@@ -344,19 +373,27 @@ impl OptionStrategy {
     }
 
     fn parse_complex_symbols(legs: &[tt_api::Leg]) -> Vec<Box<dyn ComplexSymbol>> {
-        let symbols =
-            legs.iter()
-                .map(|leg| {
-                    match InstrumentType::get_symbol_type(
-                        leg.instrument_type.as_ref().unwrap().as_str(),
-                    ) {
-                        InstrumentType::Equity => EquityOptionSymbol::parse(&leg.symbol).unwrap()
-                            as Box<dyn ComplexSymbol>,
-                        InstrumentType::Future => FutureOptionSymbol::parse(&leg.symbol).unwrap()
-                            as Box<dyn ComplexSymbol>,
-                    }
-                })
-                .collect();
+        let symbols = legs
+            .iter()
+            .map(|leg| {
+                match InstrumentType::get_symbol_type(
+                    leg.instrument_type.as_ref().unwrap().as_str(),
+                ) {
+                    InstrumentType::Equity => EquityOptionSymbol::parse(
+                        &leg.symbol,
+                        leg.quantity_direction.as_ref().unwrap(),
+                    )
+                    .unwrap()
+                        as Box<dyn ComplexSymbol>,
+                    InstrumentType::Future => FutureOptionSymbol::parse(
+                        &leg.symbol,
+                        leg.quantity_direction.as_ref().unwrap(),
+                    )
+                    .unwrap()
+                        as Box<dyn ComplexSymbol>,
+                }
+            })
+            .collect();
 
         symbols
     }

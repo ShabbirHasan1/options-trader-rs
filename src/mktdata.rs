@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
@@ -30,38 +31,38 @@ pub(crate) mod tt_api {
     pub struct FeedDataMessage {
         #[serde(rename = "type")]
         pub message: Message,
-        pub data: Vec<CandleData>,
+        pub data: GreeksEvent,
     }
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct CandleData {
-        #[serde(rename = "eventType")]
-        pub event_type: Option<String>,
-        #[serde(rename = "eventSymbol")]
-        pub event_symbol: Option<String>,
-        #[serde(rename = "eventTime")]
-        pub event_time: Option<i64>,
-        #[serde(rename = "eventFlags")]
-        pub event_flags: Option<i64>,
-        pub index: Option<i64>,
-        pub time: Option<i64>,
-        pub sequence: Option<i64>,
-        pub count: Option<i64>,
-        pub open: Option<f64>,
-        pub high: Option<f64>,
-        pub low: Option<f64>,
-        pub close: Option<f64>,
-        pub volume: Option<f64>,
-        pub vwap: Option<String>,
-        #[serde(rename = "bidVolume")]
-        pub bid_volume: Option<String>,
-        #[serde(rename = "askVolume")]
-        pub ask_volume: Option<String>,
-        #[serde(rename = "impVolatility")]
-        pub imp_volatility: Option<String>,
-        #[serde(rename = "openInterest")]
-        pub open_interest: Option<String>,
-    }
+    // #[derive(Clone, Debug, Serialize, Deserialize)]
+    // pub struct CandleData {
+    //     #[serde(rename = "eventType")]
+    //     pub event_type: Option<String>,
+    //     #[serde(rename = "eventSymbol")]
+    //     pub event_symbol: Option<String>,
+    //     #[serde(rename = "eventTime")]
+    //     pub event_time: Option<i64>,
+    //     #[serde(rename = "eventFlags")]
+    //     pub event_flags: Option<i64>,
+    //     pub index: Option<i64>,
+    //     pub time: Option<i64>,
+    //     pub sequence: Option<i64>,
+    //     pub count: Option<i64>,
+    //     pub open: Option<f64>,
+    //     pub high: Option<f64>,
+    //     pub low: Option<f64>,
+    //     pub close: Option<f64>,
+    //     pub volume: Option<f64>,
+    //     pub vwap: Option<String>,
+    //     #[serde(rename = "bidVolume")]
+    //     pub bid_volume: Option<String>,
+    //     #[serde(rename = "askVolume")]
+    //     pub ask_volume: Option<String>,
+    //     #[serde(rename = "impVolatility")]
+    //     pub imp_volatility: Option<String>,
+    //     #[serde(rename = "openInterest")]
+    //     pub open_interest: Option<String>,
+    // }
 
     // #[derive(Clone, Debug, Serialize, Deserialize)]
     // pub enum FeedEvent {
@@ -117,38 +118,38 @@ pub(crate) mod tt_api {
     // #[derive(Clone, Debug, Serialize, Deserialize)]
     // pub struct MessageEvent {}
 
-    // #[derive(Clone, Debug, Serialize, Deserialize)]
-    // pub struct GreeksEvent {
-    //     pub uid: String,
-    //     #[serde(rename = "eventType")]
-    //     pub event_type: String,
-    //     #[serde(rename = "event-flags")]
-    //     pub event_flags: f64,
-    //     #[serde(rename = "index")]
-    //     pub index: f64,
-    //     #[serde(rename = "time")]
-    //     pub time: f64,
-    //     #[serde(rename = "sequence")]
-    //     pub sequence: f64,
-    //     #[serde(rename = "price")]
-    //     pub price: f64,
-    //     #[serde(rename = "volatility")]
-    //     pub volatility: f64,
-    //     #[serde(rename = "delta")]
-    //     pub delta: f64,
-    //     #[serde(rename = "gamma")]
-    //     pub gamma: f64,
-    //     #[serde(rename = "theta")]
-    //     pub theta: f64,
-    //     #[serde(rename = "rho")]
-    //     pub rho: f64,
-    //     #[serde(rename = "vega")]
-    //     pub vega: f64,
-    //     #[serde(rename = "eventSymbol")]
-    //     pub event_symbol: String,
-    //     #[serde(rename = "event-time")]
-    //     pub event_time: f64,
-    // }
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct GreeksEvent {
+        pub uid: String,
+        #[serde(rename = "eventType")]
+        pub event_type: String,
+        #[serde(rename = "event-flags")]
+        pub event_flags: f64,
+        #[serde(rename = "index")]
+        pub index: f64,
+        #[serde(rename = "time")]
+        pub time: f64,
+        #[serde(rename = "sequence")]
+        pub sequence: f64,
+        #[serde(rename = "price")]
+        pub price: f64,
+        #[serde(rename = "volatility")]
+        pub volatility: f64,
+        #[serde(rename = "delta")]
+        pub delta: f64,
+        #[serde(rename = "gamma")]
+        pub gamma: f64,
+        #[serde(rename = "theta")]
+        pub theta: f64,
+        #[serde(rename = "rho")]
+        pub rho: f64,
+        #[serde(rename = "vega")]
+        pub vega: f64,
+        #[serde(rename = "eventSymbol")]
+        pub event_symbol: String,
+        #[serde(rename = "event-time")]
+        pub event_time: f64,
+    }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     pub struct FutureOptionProduct {
@@ -299,12 +300,14 @@ struct Snapshot {
 
 pub(crate) struct MktData {
     web_client: Arc<WebClient>,
-    events: HashMap<String, Vec<Snapshot>>,
+    events: Arc<Mutex<Vec<Snapshot>>>,
 }
 
 impl MktData {
     pub fn new(client: Arc<WebClient>, cancel_token: CancellationToken) -> Self {
         let mut receiver = client.subscribe_to_events();
+        let mut events = Arc::new(Mutex::new(Vec::new()));
+        let mut event_writer = Arc::clone(&events);
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -316,7 +319,7 @@ impl MktData {
                                 cancel_token.cancel();
                             }
                             std::result::Result::Ok(val) => {
-                                Self::handle_msg(val, &cancel_token);
+                                Self::handle_msg(&mut event_writer, val, &cancel_token).await;
                             }
                         }
                     }
@@ -329,8 +332,36 @@ impl MktData {
 
         Self {
             web_client: client,
-            events: HashMap::default(),
+            events,
         }
+    }
+
+    pub async fn subscribe_to_mktdata(
+        &mut self,
+        symbols: Vec<&str>,
+        instrument_type: InstrumentType,
+    ) -> anyhow::Result<()> {
+        for symbol in symbols {
+            let streamer_symbol = self.get_streamer_symbol(symbol, instrument_type).await?;
+            info!(
+                "Subscribing to mktdata events for symbol: {}",
+                streamer_symbol
+            );
+            self.web_client
+                .subscribe_to_symbol(&streamer_symbol)
+                .await?;
+            Self::stash_subscription(&mut self.events, symbol, &streamer_symbol).await;
+        }
+        Ok(())
+    }
+
+    pub async fn get_snapshot_data(&self, symbol: &str) -> Option<tt_api::FeedDataMessage> {
+        self.events
+            .lock()
+            .await
+            .iter()
+            .find(|snapshot| snapshot.symbol.eq(symbol))
+            .and_then(|snapshot| snapshot.mktdata.clone())
     }
 
     async fn get_streamer_symbol(
@@ -363,9 +394,8 @@ impl MktData {
         Ok(streamer_symbol)
     }
 
-    fn stash_subscription(
-        event_map: &mut HashMap<String, Vec<Snapshot>>,
-        underlying_symbol: &str,
+    async fn stash_subscription(
+        events: &mut Arc<Mutex<Vec<Snapshot>>>,
         symbol: &str,
         streamer_symbol: &str,
     ) {
@@ -374,58 +404,21 @@ impl MktData {
             streamer_symbol: streamer_symbol.to_string(),
             mktdata: None,
         };
-        if event_map.contains_key(underlying_symbol) {
-            event_map
-                .get_mut(underlying_symbol)
-                .expect(&format!(
-                    "can't find entry for underlying {}",
-                    underlying_symbol
-                ))
-                .push(snapshot);
-        } else {
-            event_map.insert(underlying_symbol.to_string(), vec![snapshot]);
-        }
+        events.lock().await.push(snapshot);
     }
 
-    pub async fn subscribe_to_mktdata(
-        &mut self,
-        underlying_symbol: &str,
-        symbols: Vec<&str>,
-        instrument_type: InstrumentType,
-    ) -> anyhow::Result<()> {
-        for symbol in symbols {
-            let streamer_symbol = self.get_streamer_symbol(symbol, instrument_type).await?;
-            info!(
-                "Subscribing to mktdata events for symbol: {}",
-                streamer_symbol
-            );
-            self.web_client
-                .subscribe_to_symbol(&streamer_symbol)
-                .await?;
-            Self::stash_subscription(
-                &mut self.events,
-                underlying_symbol,
-                symbol,
-                &streamer_symbol,
-            );
-        }
-        Ok(())
-    }
-
-    pub fn get_snapshot_data(
-        &self,
-        underlying_symbol: &str,
-        symbol: &str,
-    ) -> Option<tt_api::FeedDataMessage> {
-        self.events[underlying_symbol]
-            .iter()
-            .find(|snapshot| snapshot.symbol.eq(symbol))
-            .and_then(|snapshot| snapshot.mktdata.clone())
-    }
-
-    fn handle_msg(msg: String, _cancel_token: &CancellationToken) {
+    async fn handle_msg(
+        events: &mut Arc<Mutex<Vec<Snapshot>>>,
+        msg: String,
+        _cancel_token: &CancellationToken,
+    ) {
         if let serde_json::Result::Ok(msg) = serde_json::from_str::<tt_api::FeedDataMessage>(&msg) {
             info!("Last mktdata message received, msg: {:?}", msg);
+            events.lock().await.iter_mut().for_each(|snapshot| {
+                if snapshot.symbol.eq(&msg.data.event_symbol) {
+                    snapshot.mktdata = Some(msg.clone());
+                }
+            });
         } else {
             info!("No Last mktdata message received, msg: {:?}", msg);
         }

@@ -12,8 +12,10 @@ use tracing::info;
 use tracing::warn;
 
 use crate::mktdata::tt_api as mktd_api;
-use crate::mktdata::tt_api::CandleData;
+// use crate::mktdata::tt_api::CandleData;
 use crate::positions::tt_api as pos_api;
+use crate::positions::ComplexSymbol;
+use crate::positions::Direction;
 use crate::positions::InstrumentType;
 use crate::positions::OptionType;
 use crate::positions::StrategyType;
@@ -25,8 +27,8 @@ use super::positions::OptionStrategy;
 use super::web_client::WebClient;
 // use super::orders::Orders;
 
-trait Strategy: Sync + Send {
-    fn should_exit(&self, mktdata: &MktData) -> Result<bool>;
+trait StrategyData: Sync + Send {
+    async fn should_exit(&self, mktdata: &MktData) -> Result<bool>;
     fn get_underlying(&self) -> &str;
     fn get_symbols(&self) -> Vec<&str>;
     fn get_instrument_type(&self) -> InstrumentType;
@@ -53,28 +55,16 @@ impl fmt::Display for CreditSpread {
     }
 }
 
-impl Strategy for CreditSpread {
-    fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
-        if let Some(complex_symbol) = self.position.legs.first() {
-            let snapshot =
-                mktdata.get_snapshot_data(complex_symbol.underlying(), complex_symbol.symbol());
-            // if let Some(FeedEvent::Greeks(greeks)) = snapshot.data.first() {
-            //     if greeks.delta > 0.4 {
-            //         info!(
-            //             "Hit stop on credit spread {}",
-            //             &self.position.legs.first().unwrap().underlying()
-            //         );
-            //         return anyhow::Ok(true);
-            //     }
-            // }
-
-            // if self.position.premimum % 2 < orders.orders.get_order().pnl {
-            //     return true;
-            // }
-
-            return anyhow::Ok(false);
+impl StrategyData for CreditSpread {
+    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
+        for complex_symbol in &self.position.legs {
+            if complex_symbol.direction().eq(&Direction::Short) {
+                if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
+                    return Ok(snapshot.data.delta > 0.4);
+                }
+            }
         }
-        bail!("Something went wrong building the positions")
+        anyhow::Ok(false)
     }
 
     fn get_underlying(&self) -> &str {
@@ -114,24 +104,15 @@ impl fmt::Display for CalendarSpread {
     }
 }
 
-impl Strategy for CalendarSpread {
-    fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
-        if let Some(complex_symbol) = self.position.legs.first() {
-            let snapshot =
-                mktdata.get_snapshot_data(complex_symbol.underlying(), complex_symbol.symbol());
-            // if let Some(delta) = snapshot.delta {
-            //     if leg.delta > 40 {
-            //         return anyhow::Ok(true);
-            //     }
-            // }
-
-            // if orders.get_order().premimum % 2 < orders.orders.get_order().pnl {
-            //     return true;
-            // }
-
-            return anyhow::Ok(false);
+impl StrategyData for CalendarSpread {
+    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
+        let mut total_theta = 0.;
+        for complex_symbol in &self.position.legs {
+            if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
+                total_theta += snapshot.data.theta;
+            }
         }
-        bail!("Something went wrong building the positions")
+        Ok(total_theta < 0.)
     }
 
     fn get_underlying(&self) -> &str {
@@ -171,24 +152,18 @@ impl fmt::Display for IronCondor {
     }
 }
 
-impl Strategy for IronCondor {
-    fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
-        if let Some(complex_symbol) = self.position.legs.first() {
-            let snapshot =
-                mktdata.get_snapshot_data(complex_symbol.underlying(), complex_symbol.symbol());
-            // if let Some(delta) = snapshot.delta {
-            //     if leg.delta > 40 {
-            //         return anyhow::Ok(true);
-            //     }
-            // }
-
-            // if orders.get_order().premimum % 2 < orders.orders.get_order().pnl {
-            //     return true;
-            // }
-
-            return anyhow::Ok(false);
+impl StrategyData for IronCondor {
+    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
+        for complex_symbol in &self.position.legs {
+            if complex_symbol.direction().eq(&Direction::Short) {
+                if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
+                    if snapshot.data.delta > 0.4 {
+                        return anyhow::Ok(true);
+                    }
+                }
+            }
         }
-        bail!("Something went wrong building the positions")
+        anyhow::Ok(false)
     }
 
     fn get_underlying(&self) -> &str {
@@ -206,6 +181,13 @@ impl Strategy for IronCondor {
     fn print(&self) {
         info!("{}", &self);
     }
+}
+
+enum Strategy {
+    Calendar(CalendarSpread),
+    Credit(CreditSpread),
+    Condor(IronCondor),
+    NotTracked,
 }
 
 pub(crate) struct Strategies {}
@@ -244,7 +226,11 @@ impl Strategies {
                         }
                     }
                     _ = sleep(Duration::from_secs(5)) => {
-                        strategies.iter().for_each(|strategy| Self::check_stops(&strategy, &mktdata, &orders));
+                        for strategy in &strategies {
+                            if let Err(err) = Self::check_stops(strategy, &mktdata, &orders).await {
+                                error!("Issue checking stops, error: {}", err);
+                            }
+                        }
                     }
                     _ = cancel_token.cancelled() => {
                         break
@@ -256,17 +242,16 @@ impl Strategies {
     }
 
     async fn subscribe_to_updates(
-        strategies: &[Box<dyn Strategy>],
+        strategies: &[Strategy],
         mktdata: &mut MktData,
         _cancel_token: &CancellationToken,
     ) {
-        for strategy in strategies {
+        async fn subscribe<Strat>(strategy: &Strat, mktdata: &mut MktData)
+        where
+            Strat: StrategyData,
+        {
             if let Err(err) = mktdata
-                .subscribe_to_mktdata(
-                    strategy.get_underlying(),
-                    strategy.get_symbols(),
-                    strategy.get_instrument_type(),
-                )
+                .subscribe_to_mktdata(strategy.get_symbols(), strategy.get_instrument_type())
                 .await
             {
                 error!(
@@ -278,15 +263,30 @@ impl Strategies {
                 //cancel_token.cancel();
             }
         }
+        for strategy in strategies {
+            match &strategy {
+                Strategy::Credit(strat) => subscribe(strat, mktdata).await,
+                Strategy::Calendar(strat) => subscribe(strat, mktdata).await,
+                Strategy::Condor(strat) => subscribe(strat, mktdata).await,
+                _ => (),
+            }
+        }
     }
 
-    fn check_stops<Strategy>(strategy: &Strategy, _mktdata: &MktData, orders: &Orders) {
-        let _ = strategy;
-        // strategies.iter.map()
-        orders.liquidate_position();
+    async fn check_stops(strategy: &Strategy, mktdata: &MktData, orders: &Orders) -> Result<()> {
+        let should_exit = match &strategy {
+            Strategy::Credit(strat) => strat.should_exit(mktdata).await?,
+            Strategy::Calendar(strat) => strat.should_exit(mktdata).await?,
+            Strategy::Condor(strat) => strat.should_exit(mktdata).await?,
+            _ => false,
+        };
+        if should_exit {
+            orders.liquidate_position().await?;
+        }
+        Ok(())
     }
 
-    async fn get_strategies(web_client: &WebClient) -> Result<Vec<Box<dyn Strategy>>> {
+    async fn get_strategies(web_client: &WebClient) -> Result<Vec<Strategy>> {
         let positions = match web_client
             .get::<pos_api::AccountPositions>(
                 format!("accounts/{}/positions", web_client.get_account()).as_str(),
@@ -304,7 +304,7 @@ impl Strategies {
         Ok(Self::convert_api_data_into_strategies(positions.data.legs).await)
     }
 
-    async fn convert_api_data_into_strategies(legs: Vec<pos_api::Leg>) -> Vec<Box<dyn Strategy>> {
+    async fn convert_api_data_into_strategies(legs: Vec<pos_api::Leg>) -> Vec<Strategy> {
         let mut sorted_legs: HashMap<String, Vec<pos_api::Leg>> = HashMap::new();
 
         legs.iter().for_each(|leg| {
@@ -312,27 +312,26 @@ impl Strategies {
             sorted_legs.entry(underlying).or_default().push(leg.clone());
         });
 
-        let strats: Vec<Box<dyn Strategy>> = sorted_legs
+        let strats: Vec<Strategy> = sorted_legs
             .values()
             .map(|legs| {
                 let spread = OptionStrategy::new(legs.clone());
 
                 match &spread.strategy_type {
-                    StrategyType::CreditSpread => {
-                        Box::new(CreditSpread::new(spread)) as Box<dyn Strategy>
-                    }
-                    StrategyType::CalendarSpread => {
-                        Box::new(CalendarSpread::new(spread)) as Box<dyn Strategy>
-                    }
-                    StrategyType::IronCondor => {
-                        Box::new(IronCondor::new(spread)) as Box<dyn Strategy>
-                    }
-                    _ => Box::new(CreditSpread::new(spread)) as Box<dyn Strategy>,
+                    StrategyType::CreditSpread => Strategy::Credit(CreditSpread::new(spread)),
+                    StrategyType::CalendarSpread => Strategy::Calendar(CalendarSpread::new(spread)),
+                    StrategyType::IronCondor => Strategy::Condor(IronCondor::new(spread)),
+                    _ => Strategy::NotTracked,
                 }
             })
             .collect();
 
-        strats.iter().for_each(|strategy| strategy.print());
+        strats.iter().for_each(|strategy| match strategy {
+            Strategy::Calendar(strat) => strat.print(),
+            Strategy::Credit(strat) => strat.print(),
+            Strategy::Condor(strat) => strat.print(),
+            _ => (),
+        });
         strats
     }
 }
