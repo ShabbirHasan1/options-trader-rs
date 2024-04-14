@@ -1,9 +1,11 @@
-use anyhow::bail;
+
 use anyhow::Ok;
 use anyhow::Result;
+use percent_encoding::utf8_percent_encode;
+use percent_encoding::CONTROLS;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
+
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Mutex;
@@ -167,7 +169,7 @@ pub(crate) mod tt_api {
         #[serde(rename = "expiration-type")]
         pub expiration_type: Option<String>,
         #[serde(rename = "display-factor")]
-        pub display_factor: Option<i32>,
+        pub display_factor: Option<String>,
         #[serde(rename = "product-subtype")]
         pub product_subtype: Option<String>,
         #[serde(rename = "cash-settled")]
@@ -178,12 +180,12 @@ pub(crate) mod tt_api {
     pub struct FutureOption {
         #[serde(rename = "future-option-product")]
         pub future_option_product: Option<FutureOptionProduct>,
-        pub multiplier: Option<i32>,
+        pub multiplier: Option<String>,
         #[serde(rename = "root-symbol")]
         pub root_symbol: String,
         pub exchange: Option<String>,
         #[serde(rename = "notional-value")]
-        pub notional_value: Option<i32>,
+        pub notional_value: Option<String>,
         pub active: Option<bool>,
         #[serde(rename = "is-closing-only")]
         pub is_closing_only: Option<bool>,
@@ -194,7 +196,7 @@ pub(crate) mod tt_api {
         #[serde(rename = "is-exercisable-weekly")]
         pub is_exercisable_weekly: Option<bool>,
         #[serde(rename = "strike-factor")]
-        pub strike_factor: Option<i32>,
+        pub strike_factor: Option<String>,
         #[serde(rename = "product-code")]
         pub product_code: Option<String>,
         #[serde(rename = "days-to-expiration")]
@@ -208,7 +210,7 @@ pub(crate) mod tt_api {
         #[serde(rename = "last-trade-time")]
         pub last_trade_time: Option<String>,
         #[serde(rename = "strike-price")]
-        pub strike_price: Option<i32>,
+        pub strike_price: Option<String>,
         #[serde(rename = "is-primary-deliverable")]
         pub is_primary_deliverable: Option<bool>,
         #[serde(rename = "option-type")]
@@ -219,7 +221,7 @@ pub(crate) mod tt_api {
         #[serde(rename = "streamer-symbol")]
         pub streamer_symbol: String,
         #[serde(rename = "display-factor")]
-        pub display_factor: Option<i32>,
+        pub display_factor: Option<String>,
         #[serde(rename = "stops-trading-at")]
         pub stops_trading_at: Option<String>,
         #[serde(rename = "exercise-style")]
@@ -227,11 +229,11 @@ pub(crate) mod tt_api {
         #[serde(rename = "is-confirmed")]
         pub is_confirmed: Option<bool>,
         #[serde(rename = "future-price-ratio")]
-        pub future_price_ratio: Option<i32>,
+        pub future_price_ratio: Option<String>,
         #[serde(rename = "settlement-type")]
         pub settlement_type: Option<String>,
         #[serde(rename = "underlying-count")]
-        pub underlying_count: Option<i32>,
+        pub underlying_count: Option<String>,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -292,6 +294,8 @@ pub(crate) mod tt_api {
     }
 }
 
+const UTF8_ECODING: &percent_encoding::AsciiSet = &CONTROLS.add(b' ').add(b'/');
+
 struct Snapshot {
     symbol: String,
     streamer_symbol: String,
@@ -306,7 +310,7 @@ pub(crate) struct MktData {
 impl MktData {
     pub fn new(client: Arc<WebClient>, cancel_token: CancellationToken) -> Self {
         let mut receiver = client.subscribe_to_events();
-        let mut events = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let mut event_writer = Arc::clone(&events);
         tokio::spawn(async move {
             loop {
@@ -369,6 +373,7 @@ impl MktData {
         symbol: &str,
         instrument_type: InstrumentType,
     ) -> Result<String> {
+        let symbol = utf8_percent_encode(symbol, UTF8_ECODING).to_string();
         let streamer_symbol = match instrument_type {
             InstrumentType::Equity => {
                 self.web_client

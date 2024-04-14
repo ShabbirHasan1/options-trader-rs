@@ -40,7 +40,7 @@ fn start_logging() {
         // Don't display the event's target (module path)
         .with_target(false)
         // Assign a log-level
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::DEBUG)
         // Use a more compact, abbreviated log format
         .compact()
         .finish();
@@ -85,15 +85,10 @@ async fn main() {
         Ok(val) => val,
     };
     let cancel_token = CancellationToken::new();
-    let http_url = if settings.endpoint.eq(&EndPoint::Live) {
-        BASE_URL_PROD
+    let (http_url, ws_url) = if settings.endpoint.eq(&EndPoint::Live) {
+        (BASE_URL_PROD, WS_URL_PROD)
     } else {
-        BASE_URL_UAT
-    };
-    let ws_url = if settings.endpoint.eq(&EndPoint::Live) {
-        WS_URL_PROD
-    } else {
-        WS_URL_UAT
+        (BASE_URL_UAT, WS_URL_UAT)
     };
     let mut web_client = match WebClient::new(http_url, cancel_token.clone()).await {
         Ok(val) => val,

@@ -9,7 +9,7 @@ use tracing::warn;
 
 use crate::web_client::WebClient;
 
-use self::tt_api::AccountData;
+
 use super::web_client::sessions::acc_api;
 
 mod tt_api {

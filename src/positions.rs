@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+
 use std::fmt;
-use std::iter::FromIterator;
+
 
 use anyhow::bail;
 use anyhow::Result;
@@ -169,6 +169,7 @@ struct FutureOptionSymbol {
 
 impl FutureOptionSymbol {
     pub fn parse(symbol: &str, direction: &str) -> Result<Box<dyn ComplexSymbol>> {
+        info!("Futures symbol: {}", symbol);
         if symbol.len() < 20 || !symbol.starts_with("./") {
             bail!(
                 "Invalid format whilst parsing future option symbol: {} len: {}",
@@ -193,7 +194,7 @@ impl FutureOptionSymbol {
         };
         let option_type = OptionType::parse(parts[2].chars().nth(6).unwrap());
 
-        let strike_price = match format!("{}", &parts[2][7..]).parse::<f64>() {
+        let strike_price = match parts[2][7..].to_string().parse::<f64>() {
             Ok(strike) => strike.round(),
             Err(_) => bail!("Invalid strike price format"),
         };
@@ -279,7 +280,7 @@ impl EquityOptionSymbol {
 
         let strike_price_str = symbol[13..].trim_start_matches('0');
         let strike_price = match strike_price_str.parse::<f64>() {
-            Ok(strike) => (strike / 1000.0),
+            Ok(strike) => strike / 1000.0,
             Err(_) => bail!("Invalid strike price format"),
         };
 
@@ -333,7 +334,7 @@ impl ComplexSymbol for EquityOptionSymbol {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InstrumentType {
     Equity,
     Future,

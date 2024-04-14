@@ -6,7 +6,7 @@ use sqlx::Pool;
 use sqlx::Postgres;
 use std::env;
 
-use uuid::Uuid;
+
 
 use super::settings::Settings;
 

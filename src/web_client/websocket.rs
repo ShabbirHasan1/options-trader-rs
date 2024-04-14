@@ -19,7 +19,7 @@ use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -94,6 +94,7 @@ impl<Session> WebSocketClient<Session> {
             loop {
                 tokio::select! {
                     msg = read.next() => {
+                        dbg!("Chris from the wire, {:?}", &msg);
                         Self::handle_socket_messages(msg, session.clone(), cancel_token.clone()).await;
                     }
                     msg = to_ws.recv() => {
@@ -104,7 +105,7 @@ impl<Session> WebSocketClient<Session> {
                                 cancel_token.cancel();
                             }
                             std::result::Result::Ok(val) => {
-                                debug!("Sending payload {}", val);
+                                info!("Sending payload {}", val);
                                 let _ = write.send(Message::Text(val)).await;
                             }
                         };
@@ -153,7 +154,7 @@ impl<Session> WebSocketClient<Session> {
         Payload: Serialize + for<'a> Deserialize<'a>,
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
-        let output = format!("{}", to_json(&payload)?);
+        let output = (to_json(&payload)?).to_string();
         info!("Sending to websocket: {}", output);
         match self.session.read().await.to_ws().send(to_json(&payload)?) {
             Err(err) => anyhow::bail!("Error sending payload to websocket stream, error: {}", err),

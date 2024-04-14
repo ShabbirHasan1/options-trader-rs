@@ -85,8 +85,13 @@ impl Orders {
         }
     }
 
-    pub async fn liquidate_position(&self) -> Result<OrderData> {
-        self.web_client.get::<OrderData>("orders").await
+    pub async fn liquidate_position(&self, symbol: &[&str]) -> Result<()> {
+        info!("Sending liquidate to market {}", symbol.join(", "));
+        anyhow::Result::Ok(())
+        // if !self.orders.iter().any(|order| order.symbol.eq(symbol)) {
+        //     self.web_client.
+        // }
+        // self.web_client.get::<OrderData>("orders").await
     }
 
     fn handle_msg(msg: String, _cancel_token: &CancellationToken) {

@@ -1,5 +1,6 @@
 use anyhow::bail;
-use anyhow::Result;
+
+
 use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
@@ -16,11 +17,11 @@ use tracing::error;
 use tracing::info;
 use url::Url;
 
-use crate::mktdata::tt_api;
-use crate::web_client::sessions::md_api::AddItem;
-use crate::web_client::sessions::md_api::FeedSetup;
 
-use self::md_api::AuthState;
+use crate::web_client::sessions::md_api::AddItem;
+
+
+
 use self::md_api::FeedData;
 use self::md_api::Header;
 use super::ApiQuoteToken;
@@ -179,7 +180,9 @@ impl WsSession for AccountSession {
             "[Account Session] response on account session, msg: {}",
             response
         );
-        if let Ok(response) = serde_json::from_str::<acc_api::Response>(&response) {
+        if let serde_json::Result::Ok(response) =
+            serde_json::from_str::<acc_api::Response>(&response)
+        {
             if response.status.eq("ok") {
                 match response.action.as_str() {
                     "connect" => {
@@ -256,8 +259,8 @@ pub(crate) mod md_api {
         pub symbol: String,
         #[serde(rename = "type")]
         pub msg_type: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub from_time: Option<i64>,
+        // #[serde(skip_serializing_if = "Option::is_none")]
+        // pub from_time: Option<i64>,
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -365,7 +368,7 @@ impl MktdataSession {
             to_app,
             waiting_on_subscription: Vec::default(),
             is_alive: false,
-            heartbeat_interval: 30,
+            heartbeat_interval: 55,
         }))
     }
 
@@ -422,7 +425,7 @@ impl MktdataSession {
         if let Some(symbol) = symbol {
             self.waiting_on_subscription.push(symbol.to_string());
         }
-        if !self.is_alive {
+        if !self.is_alive || self.waiting_on_subscription.is_empty() {
             return anyhow::Ok(());
         }
         let subscriptions = self
@@ -431,7 +434,7 @@ impl MktdataSession {
             .map(|symbol| AddItem {
                 symbol: symbol.clone(),
                 msg_type: "Greeks".to_string(),
-                from_time: None,
+                // from_time: None,
             })
             .collect();
         let subscription = md_api::FeedSubscription {
@@ -441,13 +444,17 @@ impl MktdataSession {
             },
             add: subscriptions,
         };
+        info!("Subscription looks like {:?}", &subscription);
         match self.to_ws.send(to_json(&subscription).unwrap()) {
             Err(err) => bail!(
                 "Failed to subscribe request: {:?}, error: {}",
                 subscription,
                 err
             ),
-            _ => anyhow::Ok(()),
+            _ => {
+                self.waiting_on_subscription.clear();
+                anyhow::Ok(())
+            }
         }
     }
 
@@ -505,7 +512,10 @@ impl WsSession for MktdataSession {
     where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
-        if let Ok(mut payload) = serde_json::from_str::<md_api::FeedData>(&response) {
+        info!("response {}", response);
+        if let serde_json::Result::Ok(payload) =
+            serde_json::from_str::<md_api::FeedData>(&response)
+        {
             match payload.msg.msg_type.as_str() {
                 "KEEPALIVE" => {
                     info!("[MktData Session] heartbeat {:?}", payload);
@@ -524,7 +534,7 @@ impl WsSession for MktdataSession {
                     self.subscribe(None);
                 }
                 "FEED_CONFIG" => {
-                    if let Some(config) = payload.event_fields.as_ref() {
+                    if let Some(_config) = payload.event_fields.as_ref() {
                         info!("{:?} ", payload.clone());
                         info!("{:?} ", response.clone());
                         // let mut update = config.candle.as_ref().unwrap().clone();

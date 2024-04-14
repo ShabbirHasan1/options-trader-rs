@@ -9,15 +9,15 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
-use tracing::warn;
 
-use crate::mktdata::tt_api as mktd_api;
+
+
 // use crate::mktdata::tt_api::CandleData;
 use crate::positions::tt_api as pos_api;
 use crate::positions::ComplexSymbol;
 use crate::positions::Direction;
 use crate::positions::InstrumentType;
-use crate::positions::OptionType;
+
 use crate::positions::StrategyType;
 
 use super::account::Account;
@@ -27,12 +27,10 @@ use super::positions::OptionStrategy;
 use super::web_client::WebClient;
 // use super::orders::Orders;
 
-trait StrategyData: Sync + Send {
-    async fn should_exit(&self, mktdata: &MktData) -> Result<bool>;
+trait StrategyMeta: Sync + Send {
     fn get_underlying(&self) -> &str;
     fn get_symbols(&self) -> Vec<&str>;
     fn get_instrument_type(&self) -> InstrumentType;
-    fn print(&self);
 }
 
 struct CreditSpread {
@@ -42,6 +40,21 @@ struct CreditSpread {
 impl CreditSpread {
     fn new(position: OptionStrategy) -> Self {
         Self { position }
+    }
+
+    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
+        for complex_symbol in &self.position.legs {
+            if complex_symbol.direction().eq(&Direction::Short) {
+                if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
+                    return Ok(snapshot.data.delta > 0.4);
+                }
+            }
+        }
+        anyhow::Ok(false)
+    }
+
+    fn print(&self) {
+        info!("{}", &self);
     }
 }
 impl fmt::Display for CreditSpread {
@@ -55,18 +68,7 @@ impl fmt::Display for CreditSpread {
     }
 }
 
-impl StrategyData for CreditSpread {
-    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
-        for complex_symbol in &self.position.legs {
-            if complex_symbol.direction().eq(&Direction::Short) {
-                if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
-                    return Ok(snapshot.data.delta > 0.4);
-                }
-            }
-        }
-        anyhow::Ok(false)
-    }
-
+impl StrategyMeta for CreditSpread {
     fn get_underlying(&self) -> &str {
         self.position.legs.first().unwrap().underlying()
     }
@@ -78,10 +80,6 @@ impl StrategyData for CreditSpread {
     fn get_instrument_type(&self) -> InstrumentType {
         self.position.legs.first().unwrap().instrument_type()
     }
-
-    fn print(&self) {
-        info!("{}", &self);
-    }
 }
 
 struct CalendarSpread {
@@ -91,6 +89,20 @@ struct CalendarSpread {
 impl CalendarSpread {
     fn new(position: OptionStrategy) -> Self {
         Self { position }
+    }
+
+    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
+        let mut total_theta = 0.;
+        for complex_symbol in &self.position.legs {
+            if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
+                total_theta += snapshot.data.theta;
+            }
+        }
+        Ok(total_theta < 0.)
+    }
+
+    fn print(&self) {
+        info!("{}", &self);
     }
 }
 impl fmt::Display for CalendarSpread {
@@ -104,17 +116,7 @@ impl fmt::Display for CalendarSpread {
     }
 }
 
-impl StrategyData for CalendarSpread {
-    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
-        let mut total_theta = 0.;
-        for complex_symbol in &self.position.legs {
-            if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
-                total_theta += snapshot.data.theta;
-            }
-        }
-        Ok(total_theta < 0.)
-    }
-
+impl StrategyMeta for CalendarSpread {
     fn get_underlying(&self) -> &str {
         self.position.legs.first().unwrap().underlying()
     }
@@ -126,10 +128,6 @@ impl StrategyData for CalendarSpread {
     fn get_instrument_type(&self) -> InstrumentType {
         self.position.legs.first().unwrap().instrument_type()
     }
-
-    fn print(&self) {
-        info!("{}", &self);
-    }
 }
 
 struct IronCondor {
@@ -140,19 +138,7 @@ impl IronCondor {
     fn new(position: OptionStrategy) -> Self {
         Self { position }
     }
-}
-impl fmt::Display for IronCondor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "IronCondor {}: [{}\n]",
-            &self.position.legs.first().unwrap().underlying(),
-            &self.position
-        )
-    }
-}
 
-impl StrategyData for IronCondor {
     async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
         for complex_symbol in &self.position.legs {
             if complex_symbol.direction().eq(&Direction::Short) {
@@ -166,6 +152,23 @@ impl StrategyData for IronCondor {
         anyhow::Ok(false)
     }
 
+    fn print(&self) {
+        info!("{}", &self);
+    }
+}
+
+impl fmt::Display for IronCondor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "IronCondor {}: [{}\n]",
+            &self.position.legs.first().unwrap().underlying(),
+            &self.position
+        )
+    }
+}
+
+impl StrategyMeta for IronCondor {
     fn get_underlying(&self) -> &str {
         self.position.legs.first().unwrap().underlying()
     }
@@ -176,10 +179,6 @@ impl StrategyData for IronCondor {
 
     fn get_instrument_type(&self) -> InstrumentType {
         self.position.legs.first().unwrap().instrument_type()
-    }
-
-    fn print(&self) {
-        info!("{}", &self);
     }
 }
 
@@ -248,7 +247,7 @@ impl Strategies {
     ) {
         async fn subscribe<Strat>(strategy: &Strat, mktdata: &mut MktData)
         where
-            Strat: StrategyData,
+            Strat: StrategyMeta,
         {
             if let Err(err) = mktdata
                 .subscribe_to_mktdata(strategy.get_symbols(), strategy.get_instrument_type())
@@ -274,14 +273,30 @@ impl Strategies {
     }
 
     async fn check_stops(strategy: &Strategy, mktdata: &MktData, orders: &Orders) -> Result<()> {
-        let should_exit = match &strategy {
-            Strategy::Credit(strat) => strat.should_exit(mktdata).await?,
-            Strategy::Calendar(strat) => strat.should_exit(mktdata).await?,
-            Strategy::Condor(strat) => strat.should_exit(mktdata).await?,
-            _ => false,
-        };
-        if should_exit {
-            orders.liquidate_position().await?;
+        async fn send_liquidate<Strat>(strat: &Strat, orders: &Orders) -> Result<()>
+        where
+            Strat: StrategyMeta,
+        {
+            orders.liquidate_position(&strat.get_symbols()).await
+        }
+
+        match strategy {
+            Strategy::Credit(strat) => {
+                if strat.should_exit(mktdata).await? {
+                    return send_liquidate(strat, orders).await;
+                }
+            }
+            Strategy::Calendar(strat) => {
+                if strat.should_exit(mktdata).await? {
+                    return send_liquidate(strat, orders).await;
+                }
+            }
+            Strategy::Condor(strat) => {
+                if strat.should_exit(mktdata).await? {
+                    return send_liquidate(strat, orders).await;
+                }
+            }
+            _ => (),
         }
         Ok(())
     }
@@ -326,12 +341,16 @@ impl Strategies {
             })
             .collect();
 
+        Self::print_strategy_data(&strats);
+        strats
+    }
+
+    fn print_strategy_data(strats: &[Strategy]) {
         strats.iter().for_each(|strategy| match strategy {
             Strategy::Calendar(strat) => strat.print(),
             Strategy::Credit(strat) => strat.print(),
             Strategy::Condor(strat) => strat.print(),
             _ => (),
         });
-        strats
     }
 }
