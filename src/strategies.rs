@@ -10,35 +10,35 @@ use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
 
-
-
 // use crate::mktdata::tt_api::CandleData;
 use crate::positions::tt_api as pos_api;
 use crate::positions::ComplexSymbol;
 use crate::positions::Direction;
 use crate::positions::InstrumentType;
 
+use crate::positions::PriceEffect;
 use crate::positions::StrategyType;
 
 use super::account::Account;
 use super::mktdata::MktData;
 use super::orders::Orders;
-use super::positions::OptionStrategy;
+use super::positions::Position;
 use super::web_client::WebClient;
 // use super::orders::Orders;
 
-trait StrategyMeta: Sync + Send {
+pub(crate) trait StrategyMeta: Sync + Send {
     fn get_underlying(&self) -> &str;
     fn get_symbols(&self) -> Vec<&str>;
     fn get_instrument_type(&self) -> InstrumentType;
+    fn get_position(&self) -> &Position;
 }
 
 struct CreditSpread {
-    position: OptionStrategy,
+    position: Position,
 }
 
 impl CreditSpread {
-    fn new(position: OptionStrategy) -> Self {
+    fn new(position: Position) -> Self {
         Self { position }
     }
 
@@ -46,7 +46,27 @@ impl CreditSpread {
         for complex_symbol in &self.position.legs {
             if complex_symbol.direction().eq(&Direction::Short) {
                 if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
-                    return Ok(snapshot.data.delta > 0.4);
+                    snapshot.data.iter().for_each(|event| match event {
+                        FeedEvent::QuoteEvent(quote) => match self.position.strategy_type {
+                            StrategyType::CreditSpread => {
+                                let midprice = (quote.ask_price + quote.bid_price) / 2;
+                                match self.position.option_type {
+                                    OptionType::Call => {
+                                        self.position.legs[1].strike_price() < midprice
+                                    }
+                                    OptionType::Put => {
+                                        self.position.legs[1].strike_price() > midprice
+                                    }
+                                }
+                            }
+                        },
+                        FeedEvent::GreeksEvent(greeks) => {
+                            if greeks.delta > 0.4 {
+                                return true;
+                            }
+                            return false;
+                        }
+                    });
                 }
             }
         }
@@ -80,14 +100,18 @@ impl StrategyMeta for CreditSpread {
     fn get_instrument_type(&self) -> InstrumentType {
         self.position.legs.first().unwrap().instrument_type()
     }
+
+    fn get_position(&self) -> &Position {
+        &self.position
+    }
 }
 
 struct CalendarSpread {
-    position: OptionStrategy,
+    position: Position,
 }
 
 impl CalendarSpread {
-    fn new(position: OptionStrategy) -> Self {
+    fn new(position: Position) -> Self {
         Self { position }
     }
 
@@ -95,7 +119,9 @@ impl CalendarSpread {
         let mut total_theta = 0.;
         for complex_symbol in &self.position.legs {
             if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
-                total_theta += snapshot.data.theta;
+                if let tt_api::FeedEvent::QuoteEvent(quote) = &snapshot.data {
+                    total_theta += quote.theta;
+                }
             }
         }
         Ok(total_theta < 0.)
@@ -128,14 +154,18 @@ impl StrategyMeta for CalendarSpread {
     fn get_instrument_type(&self) -> InstrumentType {
         self.position.legs.first().unwrap().instrument_type()
     }
+
+    fn get_position(&self) -> &Position {
+        &self.position
+    }
 }
 
 struct IronCondor {
-    position: OptionStrategy,
+    position: Position,
 }
 
 impl IronCondor {
-    fn new(position: OptionStrategy) -> Self {
+    fn new(position: Position) -> Self {
         Self { position }
     }
 
@@ -180,6 +210,10 @@ impl StrategyMeta for IronCondor {
     fn get_instrument_type(&self) -> InstrumentType {
         self.position.legs.first().unwrap().instrument_type()
     }
+
+    fn get_position(&self) -> &Position {
+        &self.position
+    }
 }
 
 enum Strategy {
@@ -194,8 +228,12 @@ pub(crate) struct Strategies {}
 impl Strategies {
     pub async fn new(web_client: Arc<WebClient>, cancel_token: CancellationToken) -> Result<Self> {
         let _account = Account::new(Arc::clone(&web_client), cancel_token.clone());
-        let mut mktdata = MktData::new(Arc::clone(&web_client), cancel_token.clone());
-        let orders = Orders::new(Arc::clone(&web_client), cancel_token.clone());
+        let mut mktdata = Arc::new(MktData::new(Arc::clone(&web_client), cancel_token.clone()));
+        let orders = Orders::new(
+            Arc::clone(&web_client),
+            Arc::clone(&mktdata),
+            cancel_token.clone(),
+        );
         let mut strategies = match Self::get_strategies(&web_client).await {
             Ok(val) => val,
             Err(err) => bail!(
@@ -203,7 +241,7 @@ impl Strategies {
                 err
             ),
         };
-        Self::subscribe_to_updates(&strategies, &mut mktdata, &cancel_token).await;
+        Self::subscribe_to_updates(&strategies, &mktdata, &cancel_token).await;
 
         tokio::spawn(async move {
             loop {
@@ -242,15 +280,19 @@ impl Strategies {
 
     async fn subscribe_to_updates(
         strategies: &[Strategy],
-        mktdata: &mut MktData,
+        mktdata: &Arc<MktData>,
         _cancel_token: &CancellationToken,
     ) {
-        async fn subscribe<Strat>(strategy: &Strat, mktdata: &mut MktData)
+        async fn subscribe<Strat>(strategy: &Strat, mktdata: &Arc<MktData>)
         where
-            Strat: StrategyMeta,
+            Strat: StrategyMeta + Sync + Send,
         {
             if let Err(err) = mktdata
-                .subscribe_to_mktdata(strategy.get_symbols(), strategy.get_instrument_type())
+                .as_ref()
+                .subscribe_to_options_mktdata(
+                    &strategy.get_symbols(),
+                    strategy.get_instrument_type(),
+                )
                 .await
             {
                 error!(
@@ -277,7 +319,7 @@ impl Strategies {
         where
             Strat: StrategyMeta,
         {
-            orders.liquidate_position(&strat.get_symbols()).await
+            orders.liquidate_position(&strat).await
         }
 
         match strategy {
@@ -330,7 +372,7 @@ impl Strategies {
         let strats: Vec<Strategy> = sorted_legs
             .values()
             .map(|legs| {
-                let spread = OptionStrategy::new(legs.clone());
+                let spread = Position::new(legs.clone());
 
                 match &spread.strategy_type {
                     StrategyType::CreditSpread => Strategy::Credit(CreditSpread::new(spread)),

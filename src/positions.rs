@@ -1,6 +1,4 @@
-
 use std::fmt;
-
 
 use anyhow::bail;
 use anyhow::Result;
@@ -146,6 +144,7 @@ pub trait ComplexSymbol: Send + Sync {
     fn option_type(&self) -> OptionType;
     fn instrument_type(&self) -> InstrumentType;
     fn strike_price(&self) -> f64;
+    fn quantity(&self) -> i32;
     fn print(&self) -> String;
 }
 
@@ -244,6 +243,10 @@ impl ComplexSymbol for FutureOptionSymbol {
         InstrumentType::Future
     }
 
+    fn quantity(&self) -> i32 {
+        self.quantity
+    }
+
     fn strike_price(&self) -> f64 {
         self.strike_price
     }
@@ -329,6 +332,10 @@ impl ComplexSymbol for EquityOptionSymbol {
         InstrumentType::Equity
     }
 
+    fn quantity(&self) -> i32 {
+        self.quantity
+    }
+
     fn strike_price(&self) -> f64 {
         self.strike_price
     }
@@ -338,6 +345,32 @@ impl ComplexSymbol for EquityOptionSymbol {
 pub enum InstrumentType {
     Equity,
     Future,
+}
+
+impl fmt::Display for InstrumentType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let instrument_type = match self {
+            InstrumentType::Equity => String::from("Equity"),
+            InstrumentType::Future => String::from("Future"),
+        };
+        write!(f, "{}", instrument_type)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PriceEffect {
+    Credit,
+    Debit,
+}
+
+impl fmt::Display for PriceEffect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let price_effect = match self {
+            PriceEffect::Credit => String::from("Credit"),
+            PriceEffect::Debit => String::from("Debit"),
+        };
+        write!(f, "{}", price_effect)
+    }
 }
 
 impl InstrumentType {
@@ -350,12 +383,12 @@ impl InstrumentType {
     }
 }
 
-pub struct OptionStrategy {
+pub struct Position {
     pub legs: Vec<Box<dyn ComplexSymbol>>,
     pub strategy_type: StrategyType,
 }
 
-impl fmt::Display for OptionStrategy {
+impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let leg_strings: Vec<String> = self.legs.iter().map(|leg| format!("{}", leg)).collect();
         let concatenated_legs = leg_strings.join(", ");
@@ -363,8 +396,8 @@ impl fmt::Display for OptionStrategy {
     }
 }
 
-impl OptionStrategy {
-    pub fn new(legs: Vec<tt_api::Leg>) -> OptionStrategy {
+impl Position {
+    pub fn new(legs: Vec<tt_api::Leg>) -> Position {
         let symbols = Self::parse_complex_symbols(&legs);
         let strategy_type = Self::determine_strategy(&symbols, &legs);
         Self {

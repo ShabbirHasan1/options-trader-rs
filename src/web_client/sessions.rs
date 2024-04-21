@@ -1,6 +1,5 @@
 use anyhow::bail;
 
-
 use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
@@ -17,10 +16,7 @@ use tracing::error;
 use tracing::info;
 use url::Url;
 
-
 use crate::web_client::sessions::md_api::AddItem;
-
-
 
 use self::md_api::FeedData;
 use self::md_api::Header;
@@ -421,7 +417,7 @@ impl MktdataSession {
         }
     }
 
-    pub fn subscribe(&mut self, symbol: Option<&str>) -> anyhow::Result<()> {
+    pub fn subscribe(&mut self, symbol: Option<&str>, event_type: &str) -> anyhow::Result<()> {
         if let Some(symbol) = symbol {
             self.waiting_on_subscription.push(symbol.to_string());
         }
@@ -433,8 +429,7 @@ impl MktdataSession {
             .iter()
             .map(|symbol| AddItem {
                 symbol: symbol.clone(),
-                msg_type: "Greeks".to_string(),
-                // from_time: None,
+                msg_type: event_type.to_string(),
             })
             .collect();
         let subscription = md_api::FeedSubscription {
@@ -513,8 +508,7 @@ impl WsSession for MktdataSession {
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
         info!("response {}", response);
-        if let serde_json::Result::Ok(payload) =
-            serde_json::from_str::<md_api::FeedData>(&response)
+        if let serde_json::Result::Ok(payload) = serde_json::from_str::<md_api::FeedData>(&response)
         {
             match payload.msg.msg_type.as_str() {
                 "KEEPALIVE" => {
@@ -526,12 +520,11 @@ impl WsSession for MktdataSession {
                         "[MktData Session] connection response auth state: {:?}",
                         payload
                     );
-                    self.handle_auth(payload);
+                    let _ = self.handle_auth(payload);
                 }
                 "CHANNEL_OPENED" => {
                     info!("[MktData Session] Channel session {:?}", payload);
                     self.handle_connect();
-                    self.subscribe(None);
                 }
                 "FEED_CONFIG" => {
                     if let Some(_config) = payload.event_fields.as_ref() {

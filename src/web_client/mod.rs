@@ -216,13 +216,37 @@ impl WebClient {
             .await
     }
 
+    pub async fn post<Data, Response>(&self, endpoint: &str, data: Data) -> Result<Response>
+    where
+        Data: Serialize + for<'a> Deserialize<'a>,
+        Response: Serialize + for<'a> Deserialize<'a>,
+    {
+        self.http_client
+            .post::<Data, Response>(endpoint, data, Some(&self.session))
+            .await
+    }
+
+    pub async fn put<Data, Response>(&self, endpoint: &str, data: Data) -> Result<Response>
+    where
+        Data: Serialize + for<'a> Deserialize<'a>,
+        Response: Serialize + for<'a> Deserialize<'a>,
+    {
+        self.http_client
+            .put::<Data, Response>(endpoint, data, Some(&self.session))
+            .await
+    }
+
     pub fn get_account(&self) -> &str {
         &self.account
     }
 
-    pub async fn subscribe_to_symbol(&self, symbol: &str) -> Result<()> {
+    pub async fn subscribe_to_symbol(&self, symbol: &str, event_type: &str) -> Result<()> {
         let client = self.mktdata.as_ref().unwrap();
-        client.get_session().write().await.subscribe(Some(symbol))
+        client
+            .get_session()
+            .write()
+            .await
+            .subscribe(Some(symbol), event_type)
     }
 
     async fn fetch_auth_from_db(

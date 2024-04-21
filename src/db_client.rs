@@ -6,15 +6,13 @@ use sqlx::Pool;
 use sqlx::Postgres;
 use std::env;
 
-
-
 use super::settings::Settings;
 
 #[derive(Debug)]
 pub struct SqlQueryBuilder;
 
 impl SqlQueryBuilder {
-    pub fn prepare_insert_statement(table: &str, columns: &Vec<&str>) -> String {
+    pub fn prepare_insert_statement(table: &str, columns: &[&str]) -> String {
         let sql = format!("INSERT INTO {} ({})", table, columns.join(", "));
         let placeholders: String = (1..=columns.len())
             .map(|i| format!("${}", i))
@@ -24,7 +22,7 @@ impl SqlQueryBuilder {
         format!("{} VALUES ({})", sql, placeholders)
     }
 
-    pub fn prepare_update_statement(table: &str, columns: &Vec<&str>) -> String {
+    pub fn prepare_update_statement(table: &str, columns: &[&str]) -> String {
         let sql = format!("UPDATE {} SET", table);
 
         let placeholders: String = (1..=columns.len() - 1)
@@ -42,7 +40,7 @@ impl SqlQueryBuilder {
         )
     }
 
-    pub fn prepare_fetch_statement(table: &str, filters: &Vec<&str>) -> String {
+    pub fn prepare_fetch_statement(table: &str, filters: &[&str]) -> String {
         if filters.is_empty() {
             return format!("SELECT * FROM {}", table);
         }
@@ -58,7 +56,7 @@ impl SqlQueryBuilder {
     }
 
     #[cfg(test)]
-    pub fn prepare_delete_statement(table: &str, columns: &Vec<&str>) -> String {
+    pub fn prepare_delete_statement(table: &str, columns: &[&str]) -> String {
         if columns.is_empty() {
             return format!("DELETE FROM {}", table);
         }
