@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::to_string as to_json;
 use std::sync::Arc;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
@@ -52,13 +53,19 @@ impl<Session> WebSocketClient<Session> {
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
         match message {
-            Some(CoreResult::Ok(Message::Text(response))) => {
-                session
-                    .write()
-                    .await
-                    .handle_response::<Session>(response, cancel_token);
-            }
-            Some(_) => info!("Type not handled"),
+            Some(var) => match var {
+                Ok(Message::Text(response)) => {
+                    session
+                        .write()
+                        .await
+                        .handle_response::<Session>(response, cancel_token);
+                }
+                Ok(Message::Close(Some(CloseFrame { code, reason }))) => {
+                    info!("Exit code: {}, reason: {}", code, reason)
+                }
+                Ok(var) => info!("unknown type: {:?}", var),
+                Err(err) => error!("Error: {}", err),
+            },
             None => {
                 info!("Stream closed, cancelling session on client");
                 cancel_token.cancel();
@@ -94,7 +101,6 @@ impl<Session> WebSocketClient<Session> {
             loop {
                 tokio::select! {
                     msg = read.next() => {
-                        dbg!("Chris from the wire, {:?}", &msg);
                         Self::handle_socket_messages(msg, session.clone(), cancel_token.clone()).await;
                     }
                     msg = to_ws.recv() => {

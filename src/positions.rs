@@ -1,12 +1,12 @@
-
-use std::fmt;
-
-
 use anyhow::bail;
 use anyhow::Result;
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::Deserialize;
 use serde::Serialize;
+use std::fmt;
+use std::str::FromStr;
 use tracing::info;
 
 pub(crate) mod tt_api {
@@ -92,7 +92,7 @@ pub enum StrategyType {
     Other,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OptionType {
     Call,
     Put,
@@ -145,7 +145,8 @@ pub trait ComplexSymbol: Send + Sync {
     fn expiration_date(&self) -> NaiveDate;
     fn option_type(&self) -> OptionType;
     fn instrument_type(&self) -> InstrumentType;
-    fn strike_price(&self) -> f64;
+    fn strike_price(&self) -> Decimal;
+    fn quantity(&self) -> i32;
     fn print(&self) -> String;
 }
 
@@ -162,8 +163,7 @@ struct FutureOptionSymbol {
     expiration_date: NaiveDate,
     direction: Direction,
     option_type: OptionType,
-    strike_price: f64,
-    current_price: f64,
+    strike_price: Decimal,
     quantity: i32,
 }
 
@@ -194,10 +194,8 @@ impl FutureOptionSymbol {
         };
         let option_type = OptionType::parse(parts[2].chars().nth(6).unwrap());
 
-        let strike_price = match parts[2][7..].to_string().parse::<f64>() {
-            Ok(strike) => strike.round(),
-            Err(_) => bail!("Invalid strike price format"),
-        };
+        //TODO fix the strike price
+        let strike_price = Decimal::from_str(&parts[2][7..].to_string())?;
 
         Ok(Box::new(FutureOptionSymbol {
             symbol: symbol.to_string(),
@@ -206,7 +204,6 @@ impl FutureOptionSymbol {
             direction: Direction::parse(direction),
             option_type,
             strike_price,
-            current_price: 0.0,
             quantity: 0,
         }))
     }
@@ -244,7 +241,11 @@ impl ComplexSymbol for FutureOptionSymbol {
         InstrumentType::Future
     }
 
-    fn strike_price(&self) -> f64 {
+    fn quantity(&self) -> i32 {
+        self.quantity
+    }
+
+    fn strike_price(&self) -> Decimal {
         self.strike_price
     }
 }
@@ -256,8 +257,7 @@ struct EquityOptionSymbol {
     expiration_date: NaiveDate,
     direction: Direction,
     option_type: OptionType,
-    strike_price: f64,
-    current_price: f64,
+    strike_price: Decimal,
     quantity: i32,
 }
 
@@ -278,11 +278,8 @@ impl EquityOptionSymbol {
         };
         let option_type = OptionType::parse(symbol.chars().nth(12).unwrap());
 
-        let strike_price_str = symbol[13..].trim_start_matches('0');
-        let strike_price = match strike_price_str.parse::<f64>() {
-            Ok(strike) => strike / 1000.0,
-            Err(_) => bail!("Invalid strike price format"),
-        };
+        let strike_price = Decimal::from_str(symbol[13..].trim_start_matches('0'))?;
+        let strike_price = strike_price / Decimal::new(1000, 0);
 
         Ok(Box::new(EquityOptionSymbol {
             symbol: symbol.to_string(),
@@ -291,7 +288,6 @@ impl EquityOptionSymbol {
             direction: Direction::parse(direction),
             option_type,
             strike_price,
-            current_price: 0.0,
             quantity: 0,
         }))
     }
@@ -329,7 +325,11 @@ impl ComplexSymbol for EquityOptionSymbol {
         InstrumentType::Equity
     }
 
-    fn strike_price(&self) -> f64 {
+    fn quantity(&self) -> i32 {
+        self.quantity
+    }
+
+    fn strike_price(&self) -> Decimal {
         self.strike_price
     }
 }
@@ -338,6 +338,32 @@ impl ComplexSymbol for EquityOptionSymbol {
 pub enum InstrumentType {
     Equity,
     Future,
+}
+
+impl fmt::Display for InstrumentType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let instrument_type = match self {
+            InstrumentType::Equity => String::from("Equity"),
+            InstrumentType::Future => String::from("Future"),
+        };
+        write!(f, "{}", instrument_type)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PriceEffect {
+    Credit,
+    Debit,
+}
+
+impl fmt::Display for PriceEffect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let price_effect = match self {
+            PriceEffect::Credit => String::from("Credit"),
+            PriceEffect::Debit => String::from("Debit"),
+        };
+        write!(f, "{}", price_effect)
+    }
 }
 
 impl InstrumentType {
@@ -350,12 +376,12 @@ impl InstrumentType {
     }
 }
 
-pub struct OptionStrategy {
+pub struct Position {
     pub legs: Vec<Box<dyn ComplexSymbol>>,
     pub strategy_type: StrategyType,
 }
 
-impl fmt::Display for OptionStrategy {
+impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let leg_strings: Vec<String> = self.legs.iter().map(|leg| format!("{}", leg)).collect();
         let concatenated_legs = leg_strings.join(", ");
@@ -363,8 +389,8 @@ impl fmt::Display for OptionStrategy {
     }
 }
 
-impl OptionStrategy {
-    pub fn new(legs: Vec<tt_api::Leg>) -> OptionStrategy {
+impl Position {
+    pub fn new(legs: Vec<tt_api::Leg>) -> Position {
         let symbols = Self::parse_complex_symbols(&legs);
         let strategy_type = Self::determine_strategy(&symbols, &legs);
         Self {

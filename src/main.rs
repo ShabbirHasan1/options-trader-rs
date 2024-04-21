@@ -40,7 +40,7 @@ fn start_logging() {
         // Don't display the event's target (module path)
         .with_target(false)
         // Assign a log-level
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::INFO)
         // Use a more compact, abbreviated log format
         .compact()
         .finish();

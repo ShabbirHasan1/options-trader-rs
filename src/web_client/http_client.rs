@@ -34,9 +34,8 @@ impl Middleware for LoggingMiddleware {
         for (name, value) in req.iter() {
             info!("Headers {}: {}", name, value);
         }
-
         let res = next.run(req, client).await?;
-        info!("Response: {:?}", res);
+        debug!("Response: {:?}", res);
 
         surf::Result::Ok(res)
     }
@@ -112,6 +111,44 @@ impl HttpClient {
                 core::result::Result::Ok(val) => val,
                 Err(err) => bail!("Failed to post request {}", err),
             };
+
+        let mut response = match builder.await {
+            core::result::Result::Ok(val) => val,
+            Err(err) => bail!("Failed to post request {}", err),
+        };
+
+        if !response.status().is_success() {
+            bail!("POST Request failed with status: {}", response.status());
+        }
+
+        debug!("POST Response body: {:?}", response);
+        match response.body_json::<Response>().await {
+            surf::Result::Ok(val) => Ok(val),
+            Err(err) => bail!("Could not read json body, error: {}", err),
+        }
+    }
+
+    pub async fn put<Payload, Response>(
+        &self,
+        endpoint: &str,
+        data: Payload,
+        session: Option<&str>,
+    ) -> Result<Response>
+    where
+        Payload: Serialize + for<'a> Deserialize<'a>,
+        Response: Serialize + for<'a> Deserialize<'a>,
+    {
+        let url = Url::parse(format!("{}/{}", self.base_url, endpoint).as_str())?;
+        let payload = to_json(&data)?;
+        info!(
+            "request to endpoint: {}/{} with payload: {}",
+            self.base_url, endpoint, payload
+        );
+        let builder = match Self::add_custom_headers(session, self.client.put(url)).body_json(&data)
+        {
+            core::result::Result::Ok(val) => val,
+            Err(err) => bail!("Failed to post request {}", err),
+        };
 
         let mut response = match builder.await {
             core::result::Result::Ok(val) => val,

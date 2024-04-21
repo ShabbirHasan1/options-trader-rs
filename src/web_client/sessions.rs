@@ -1,6 +1,5 @@
 use anyhow::bail;
 
-
 use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
@@ -17,10 +16,7 @@ use tracing::error;
 use tracing::info;
 use url::Url;
 
-
 use crate::web_client::sessions::md_api::AddItem;
-
-
 
 use self::md_api::FeedData;
 use self::md_api::Header;
@@ -421,22 +417,22 @@ impl MktdataSession {
         }
     }
 
-    pub fn subscribe(&mut self, symbol: Option<&str>) -> anyhow::Result<()> {
+    pub fn subscribe(&mut self, symbol: Option<&str>, event_type: Vec<&str>) -> anyhow::Result<()> {
         if let Some(symbol) = symbol {
             self.waiting_on_subscription.push(symbol.to_string());
         }
         if !self.is_alive || self.waiting_on_subscription.is_empty() {
             return anyhow::Ok(());
         }
-        let subscriptions = self
-            .waiting_on_subscription
-            .iter()
-            .map(|symbol| AddItem {
-                symbol: symbol.clone(),
-                msg_type: "Greeks".to_string(),
-                // from_time: None,
+        let mut subscriptions = Vec::new();
+        self.waiting_on_subscription.iter().for_each(|symbol| {
+            event_type.iter().for_each(|event| {
+                subscriptions.push(AddItem {
+                    symbol: symbol.clone(),
+                    msg_type: event.to_string(),
+                })
             })
-            .collect();
+        });
         let subscription = md_api::FeedSubscription {
             msg: Header {
                 msg_type: "FEED_SUBSCRIPTION".to_string(),
@@ -512,9 +508,8 @@ impl WsSession for MktdataSession {
     where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
-        info!("response {}", response);
-        if let serde_json::Result::Ok(payload) =
-            serde_json::from_str::<md_api::FeedData>(&response)
+        debug!("response {}", response);
+        if let serde_json::Result::Ok(payload) = serde_json::from_str::<md_api::FeedData>(&response)
         {
             match payload.msg.msg_type.as_str() {
                 "KEEPALIVE" => {
@@ -526,12 +521,11 @@ impl WsSession for MktdataSession {
                         "[MktData Session] connection response auth state: {:?}",
                         payload
                     );
-                    self.handle_auth(payload);
+                    let _ = self.handle_auth(payload);
                 }
                 "CHANNEL_OPENED" => {
                     info!("[MktData Session] Channel session {:?}", payload);
                     self.handle_connect();
-                    self.subscribe(None);
                 }
                 "FEED_CONFIG" => {
                     if let Some(_config) = payload.event_fields.as_ref() {

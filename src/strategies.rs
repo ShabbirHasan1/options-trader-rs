@@ -1,56 +1,84 @@
 use anyhow::bail;
 use anyhow::Result;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::fmt;
 use std::iter::Iterator;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
 
-
-
 // use crate::mktdata::tt_api::CandleData;
-use crate::positions::tt_api as pos_api;
-use crate::positions::ComplexSymbol;
-use crate::positions::Direction;
-use crate::positions::InstrumentType;
-
-use crate::positions::StrategyType;
-
 use super::account::Account;
 use super::mktdata::MktData;
 use super::orders::Orders;
-use super::positions::OptionStrategy;
+use super::positions::Position;
 use super::web_client::WebClient;
-// use super::orders::Orders;
+use crate::mktdata;
+use crate::mktdata::tt_api::FeedEvent;
+use crate::positions::tt_api as pos_api;
+use crate::positions::Direction;
+use crate::positions::InstrumentType;
+use crate::positions::OptionType;
+use crate::positions::PriceEffect;
+use crate::positions::StrategyType;
+use crate::strategies;
 
-trait StrategyMeta: Sync + Send {
+pub(crate) trait StrategyMeta: Sync + Send {
     fn get_underlying(&self) -> &str;
     fn get_symbols(&self) -> Vec<&str>;
     fn get_instrument_type(&self) -> InstrumentType;
+    fn get_position(&self) -> &Position;
 }
 
 struct CreditSpread {
-    position: OptionStrategy,
+    position: Position,
 }
 
 impl CreditSpread {
-    fn new(position: OptionStrategy) -> Self {
+    fn new(position: Position) -> Self {
         Self { position }
     }
 
-    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
-        for complex_symbol in &self.position.legs {
-            if complex_symbol.direction().eq(&Direction::Short) {
-                if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
-                    return Ok(snapshot.data.delta > 0.4);
-                }
-            }
+    async fn should_exit(&self, mktdata: &MktData) -> bool {
+        fn get_back_leg_option_type(position: &Position) -> OptionType {
+            position.legs[1].option_type()
         }
-        anyhow::Ok(false)
+
+        let events = mktdata
+            .get_snapshot_events(self.position.legs[0].underlying())
+            .await;
+
+        let mut mid_price = Decimal::default();
+        let strike_price = self.position.legs[0].strike_price();
+        let result = events
+            .iter()
+            .find(|event| matches!(event, FeedEvent::QuoteEvent(_)))
+            .and_then(|event| match event {
+                FeedEvent::QuoteEvent(quote) => {
+                    mid_price = (quote.ask_price + quote.bid_price) / Decimal::new(2, 0);
+                    let result = match get_back_leg_option_type(&self.position) {
+                        OptionType::Call => strike_price < mid_price,
+                        OptionType::Put => strike_price > mid_price,
+                    };
+                    Some(result)
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+        if result {
+            info!(
+                "Should exit position: {} mid price: {} has crossed strike price: {}",
+                self.get_underlying(),
+                mid_price,
+                strike_price
+            );
+        }
+        result
     }
 
     fn print(&self) {
@@ -80,25 +108,31 @@ impl StrategyMeta for CreditSpread {
     fn get_instrument_type(&self) -> InstrumentType {
         self.position.legs.first().unwrap().instrument_type()
     }
+
+    fn get_position(&self) -> &Position {
+        &self.position
+    }
 }
 
 struct CalendarSpread {
-    position: OptionStrategy,
+    position: Position,
 }
 
 impl CalendarSpread {
-    fn new(position: OptionStrategy) -> Self {
+    fn new(position: Position) -> Self {
         Self { position }
     }
 
-    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
+    async fn should_exit(&self, mktdata: &MktData) -> bool {
         let mut total_theta = 0.;
         for complex_symbol in &self.position.legs {
-            if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
-                total_theta += snapshot.data.theta;
-            }
+            // if let Some(event) = mktdata.get_snapshot_events(complex_symbol.symbol()).await {
+            //     // if let FeedEvent::GreeksEvent(greek) = event {
+            //     //     total_theta += greek.theta;
+            //     // }
+            // }
         }
-        Ok(total_theta < 0.)
+        total_theta < 0.
     }
 
     fn print(&self) {
@@ -128,28 +162,64 @@ impl StrategyMeta for CalendarSpread {
     fn get_instrument_type(&self) -> InstrumentType {
         self.position.legs.first().unwrap().instrument_type()
     }
+
+    fn get_position(&self) -> &Position {
+        &self.position
+    }
 }
 
 struct IronCondor {
-    position: OptionStrategy,
+    position: Position,
 }
 
 impl IronCondor {
-    fn new(position: OptionStrategy) -> Self {
+    fn new(position: Position) -> Self {
         Self { position }
     }
 
-    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
-        for complex_symbol in &self.position.legs {
-            if complex_symbol.direction().eq(&Direction::Short) {
-                if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
-                    if snapshot.data.delta > 0.4 {
-                        return anyhow::Ok(true);
-                    }
+    //Matches the near leg strike price against underlying mid price
+    async fn should_exit(&self, mktdata: &MktData) -> bool {
+        let events = mktdata.get_snapshot_events(self.get_underlying()).await;
+        let mid_price = events
+            .iter()
+            .find(|event| matches!(event, FeedEvent::QuoteEvent(_)))
+            .and_then(|event| match event {
+                FeedEvent::QuoteEvent(quote) => {
+                    Some((quote.ask_price + quote.bid_price) / Decimal::new(2, 0))
                 }
-            }
-        }
-        anyhow::Ok(false)
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let call_strikes: Vec<Decimal> = self
+            .position
+            .legs
+            .iter()
+            .filter_map(|leg| {
+                if leg.option_type().eq(&OptionType::Call) {
+                    Some(leg.strike_price())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let put_strikes: Vec<Decimal> = self
+            .position
+            .legs
+            .iter()
+            .filter_map(|leg| {
+                if leg.option_type().eq(&OptionType::Put) {
+                    Some(leg.strike_price())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let call_strike = call_strikes.iter().min().unwrap_or(&Decimal::MAX);
+        let put_strike = put_strikes.iter().max().unwrap_or(&Decimal::ZERO);
+
+        mid_price < *call_strike || mid_price > *put_strike
     }
 
     fn print(&self) {
@@ -180,6 +250,10 @@ impl StrategyMeta for IronCondor {
     fn get_instrument_type(&self) -> InstrumentType {
         self.position.legs.first().unwrap().instrument_type()
     }
+
+    fn get_position(&self) -> &Position {
+        &self.position
+    }
 }
 
 enum Strategy {
@@ -194,8 +268,15 @@ pub(crate) struct Strategies {}
 impl Strategies {
     pub async fn new(web_client: Arc<WebClient>, cancel_token: CancellationToken) -> Result<Self> {
         let _account = Account::new(Arc::clone(&web_client), cancel_token.clone());
-        let mut mktdata = MktData::new(Arc::clone(&web_client), cancel_token.clone());
-        let orders = Orders::new(Arc::clone(&web_client), cancel_token.clone());
+        let mktdata = Arc::new(RwLock::new(MktData::new(
+            Arc::clone(&web_client),
+            cancel_token.clone(),
+        )));
+        let mut orders = Orders::new(
+            Arc::clone(&web_client),
+            Arc::clone(&mktdata),
+            cancel_token.clone(),
+        );
         let mut strategies = match Self::get_strategies(&web_client).await {
             Ok(val) => val,
             Err(err) => bail!(
@@ -203,7 +284,7 @@ impl Strategies {
                 err
             ),
         };
-        Self::subscribe_to_updates(&strategies, &mut mktdata, &cancel_token).await;
+        Self::subscribe_to_updates(&strategies, &mktdata, &cancel_token).await;
 
         tokio::spawn(async move {
             loop {
@@ -214,7 +295,7 @@ impl Strategies {
                     _ = sleep(Duration::from_secs(30)) => {
                         strategies = match Self::get_strategies(&web_client).await {
                             Ok(val) => {
-                                Self::subscribe_to_updates(&val, &mut mktdata, &cancel_token).await;
+                                Self::subscribe_to_updates(&val, &mktdata, &cancel_token).await;
                                 val
                             }
                             Err(err) => {
@@ -225,8 +306,9 @@ impl Strategies {
                         }
                     }
                     _ = sleep(Duration::from_secs(5)) => {
+                        let read_guard = mktdata.read().await;
                         for strategy in &strategies {
-                            if let Err(err) = Self::check_stops(strategy, &mktdata, &orders).await {
+                            if let Err(err) = Self::check_stops(strategy, &read_guard, &mut orders).await {
                                 error!("Issue checking stops, error: {}", err);
                             }
                         }
@@ -242,24 +324,45 @@ impl Strategies {
 
     async fn subscribe_to_updates(
         strategies: &[Strategy],
-        mktdata: &mut MktData,
+        mktdata: &Arc<RwLock<MktData>>,
         _cancel_token: &CancellationToken,
     ) {
-        async fn subscribe<Strat>(strategy: &Strat, mktdata: &mut MktData)
+        async fn subscribe<Strat>(strategy: &Strat, mktdata: &Arc<RwLock<MktData>>)
         where
-            Strat: StrategyMeta,
+            Strat: StrategyMeta + Sync + Send,
         {
             if let Err(err) = mktdata
-                .subscribe_to_mktdata(strategy.get_symbols(), strategy.get_instrument_type())
+                .write()
+                .await
+                .subscribe_to_equity_mktdata(
+                    strategy.get_underlying(),
+                    strategy.get_instrument_type(),
+                )
                 .await
             {
                 error!(
                     "Failed to subscribe to mktdata for symbol: {}, error: {}",
-                    strategy.get_symbols().join(", "),
+                    strategy.get_underlying(),
                     err
                 );
-                //TODO: Should we restart the app
-                //cancel_token.cancel();
+            }
+
+            for symbol in strategy.get_symbols() {
+                if let Err(err) = mktdata
+                    .write()
+                    .await
+                    .subscribe_to_options_mktdata(
+                        symbol,
+                        strategy.get_underlying(),
+                        strategy.get_instrument_type(),
+                    )
+                    .await
+                {
+                    error!(
+                        "Failed to subscribe to mktdata for symbol: {}, error: {}",
+                        symbol, err
+                    );
+                }
             }
         }
         for strategy in strategies {
@@ -272,30 +375,47 @@ impl Strategies {
         }
     }
 
-    async fn check_stops(strategy: &Strategy, mktdata: &MktData, orders: &Orders) -> Result<()> {
-        async fn send_liquidate<Strat>(strat: &Strat, orders: &Orders) -> Result<()>
+    async fn check_stops(
+        strategy: &Strategy,
+        mktdata: &MktData,
+        orders: &mut Orders,
+    ) -> Result<()> {
+        async fn send_liquidate<Strat>(strat: &Strat, orders: &mut Orders) -> Result<()>
         where
             Strat: StrategyMeta,
         {
-            orders.liquidate_position(&strat.get_symbols()).await
+            let price_effect = match strat.get_position().legs[0].direction() {
+                Direction::Short => PriceEffect::Credit,
+                Direction::Long => PriceEffect::Debit,
+            };
+            orders.liquidate_position(strat, price_effect).await
         }
 
         match strategy {
             Strategy::Credit(strat) => {
-                if strat.should_exit(mktdata).await? {
-                    return send_liquidate(strat, orders).await;
+                if strat.should_exit(mktdata).await {
+                    match send_liquidate(strat, orders).await {
+                        Ok(val) => val,
+                        Err(err) => error!("Failed to liquidate position, error: {}", err),
+                    }
                 }
             }
-            Strategy::Calendar(strat) => {
-                if strat.should_exit(mktdata).await? {
-                    return send_liquidate(strat, orders).await;
-                }
-            }
-            Strategy::Condor(strat) => {
-                if strat.should_exit(mktdata).await? {
-                    return send_liquidate(strat, orders).await;
-                }
-            }
+            // Strategy::Calendar(strat) => {
+            //     if strat.should_exit(mktdata).await {
+            //         match send_liquidate(strat, orders).await {
+            //             Ok(val) => val,
+            //             Err(err) => error!("Failed to liquidate position, error: {}", err),
+            //         }
+            //     }
+            // }
+            // Strategy::Condor(strat) => {
+            //     if strat.should_exit(mktdata).await {
+            //         match send_liquidate(strat, orders).await {
+            //             Ok(val) => val,
+            //             Err(err) => error!("Failed to liquidate position, error: {}", err),
+            //         }
+            //     }
+            // }
             _ => (),
         }
         Ok(())
@@ -330,7 +450,7 @@ impl Strategies {
         let strats: Vec<Strategy> = sorted_legs
             .values()
             .map(|legs| {
-                let spread = OptionStrategy::new(legs.clone());
+                let spread = Position::new(legs.clone());
 
                 match &spread.strategy_type {
                     StrategyType::CreditSpread => Strategy::Credit(CreditSpread::new(spread)),
