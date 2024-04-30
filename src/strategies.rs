@@ -5,25 +5,29 @@ use std::fmt;
 use std::iter::Iterator;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
+use tokio::sync::RwLockWriteGuard;
+use tokio::time::error::Elapsed;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
+use tracing::event;
 use tracing::info;
 
 // use crate::mktdata::tt_api::CandleData;
-use crate::positions::tt_api as pos_api;
-use crate::positions::ComplexSymbol;
-use crate::positions::Direction;
-use crate::positions::InstrumentType;
-
-use crate::positions::PriceEffect;
-use crate::positions::StrategyType;
-
 use super::account::Account;
 use super::mktdata::MktData;
 use super::orders::Orders;
 use super::positions::Position;
 use super::web_client::WebClient;
+use crate::mktdata::tt_api::FeedEvent;
+use crate::positions::tt_api as pos_api;
+use crate::positions::ComplexSymbol;
+use crate::positions::Direction;
+use crate::positions::InstrumentType;
+use crate::positions::OptionType;
+use crate::positions::PriceEffect;
+use crate::positions::StrategyType;
 // use super::orders::Orders;
 
 pub(crate) trait StrategyMeta: Sync + Send {
@@ -42,35 +46,36 @@ impl CreditSpread {
         Self { position }
     }
 
-    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
-        for complex_symbol in &self.position.legs {
-            if complex_symbol.direction().eq(&Direction::Short) {
-                if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
-                    snapshot.data.iter().for_each(|event| match event {
-                        FeedEvent::QuoteEvent(quote) => match self.position.strategy_type {
-                            StrategyType::CreditSpread => {
-                                let midprice = (quote.ask_price + quote.bid_price) / 2;
-                                match self.position.option_type {
-                                    OptionType::Call => {
-                                        self.position.legs[1].strike_price() < midprice
-                                    }
-                                    OptionType::Put => {
-                                        self.position.legs[1].strike_price() > midprice
-                                    }
-                                }
-                            }
-                        },
-                        FeedEvent::GreeksEvent(greeks) => {
-                            if greeks.delta > 0.4 {
-                                return true;
-                            }
-                            return false;
-                        }
-                    });
-                }
-            }
+    async fn should_exit(&self, mktdata: &MktData) -> bool {
+        fn get_back_leg_strike_price() {}
+
+        fn get_back_leg_option_type(position: &Position) -> OptionType {
+            position.legs[1].option_type()
         }
-        anyhow::Ok(false)
+
+        let events = mktdata
+            .get_snapshot_events(self.position.legs[1].symbol())
+            .await;
+
+        events
+            .iter()
+            .find(|event| match event {
+                FeedEvent::QuoteEvent(_) => true,
+                _ => false,
+            })
+            .and_then(|event| match event {
+                FeedEvent::QuoteEvent(quote) => {
+                    let strike_price = self.position.legs[1].strike_price();
+                    let mid_price = (quote.ask_price + quote.bid_price) / 2.;
+                    let result = match get_back_leg_option_type(&self.position) {
+                        OptionType::Call => strike_price < mid_price,
+                        OptionType::Put => strike_price > mid_price,
+                    };
+                    Some(result)
+                }
+                _ => None,
+            })
+            .unwrap()
     }
 
     fn print(&self) {
@@ -115,16 +120,16 @@ impl CalendarSpread {
         Self { position }
     }
 
-    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
+    async fn should_exit(&self, mktdata: &MktData) -> bool {
         let mut total_theta = 0.;
         for complex_symbol in &self.position.legs {
-            if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
-                if let tt_api::FeedEvent::QuoteEvent(quote) = &snapshot.data {
-                    total_theta += quote.theta;
-                }
-            }
+            // if let Some(event) = mktdata.get_snapshot_events(complex_symbol.symbol()).await {
+            //     // if let FeedEvent::GreeksEvent(greek) = event {
+            //     //     total_theta += greek.theta;
+            //     // }
+            // }
         }
-        Ok(total_theta < 0.)
+        total_theta < 0.
     }
 
     fn print(&self) {
@@ -169,17 +174,41 @@ impl IronCondor {
         Self { position }
     }
 
-    async fn should_exit(&self, mktdata: &MktData) -> anyhow::Result<bool> {
-        for complex_symbol in &self.position.legs {
-            if complex_symbol.direction().eq(&Direction::Short) {
-                if let Some(snapshot) = mktdata.get_snapshot_data(complex_symbol.symbol()).await {
-                    if snapshot.data.delta > 0.4 {
-                        return anyhow::Ok(true);
+    async fn should_exit(&self, mktdata: &MktData) -> bool {
+        let front_leg_strikes: Vec<(String, f64, OptionType)> = self
+            .position
+            .legs
+            .iter()
+            .filter(|leg| leg.direction() == Direction::Short)
+            .map(|leg| {
+                (
+                    leg.symbol().to_string(),
+                    leg.strike_price(),
+                    leg.option_type(),
+                )
+            })
+            .collect();
+
+        let mut result = false;
+        for (symbol, strike_price, option_type) in &front_leg_strikes {
+            let events = mktdata.get_snapshot_events(symbol).await;
+            result |= events
+                .iter()
+                .find(|event| matches!(event, FeedEvent::QuoteEvent(_)))
+                .and_then(|event| match event {
+                    FeedEvent::QuoteEvent(quote) => {
+                        let mid_price = (quote.bid_price + quote.ask_price) / 2.;
+                        let result = match option_type {
+                            OptionType::Put => *strike_price > mid_price,
+                            OptionType::Call => *strike_price < mid_price,
+                        };
+                        Some(result)
                     }
-                }
-            }
+                    _ => None,
+                })
+                .unwrap();
         }
-        anyhow::Ok(false)
+        result
     }
 
     fn print(&self) {
@@ -228,7 +257,10 @@ pub(crate) struct Strategies {}
 impl Strategies {
     pub async fn new(web_client: Arc<WebClient>, cancel_token: CancellationToken) -> Result<Self> {
         let _account = Account::new(Arc::clone(&web_client), cancel_token.clone());
-        let mut mktdata = Arc::new(MktData::new(Arc::clone(&web_client), cancel_token.clone()));
+        let mktdata = Arc::new(RwLock::new(MktData::new(
+            Arc::clone(&web_client),
+            cancel_token.clone(),
+        )));
         let orders = Orders::new(
             Arc::clone(&web_client),
             Arc::clone(&mktdata),
@@ -252,7 +284,7 @@ impl Strategies {
                     _ = sleep(Duration::from_secs(30)) => {
                         strategies = match Self::get_strategies(&web_client).await {
                             Ok(val) => {
-                                Self::subscribe_to_updates(&val, &mut mktdata, &cancel_token).await;
+                                Self::subscribe_to_updates(&val, &mktdata, &cancel_token).await;
                                 val
                             }
                             Err(err) => {
@@ -263,8 +295,9 @@ impl Strategies {
                         }
                     }
                     _ = sleep(Duration::from_secs(5)) => {
+                        let read_guard = mktdata.read().await;
                         for strategy in &strategies {
-                            if let Err(err) = Self::check_stops(strategy, &mktdata, &orders).await {
+                            if let Err(err) = Self::check_stops(strategy, &read_guard, &orders).await {
                                 error!("Issue checking stops, error: {}", err);
                             }
                         }
@@ -280,28 +313,25 @@ impl Strategies {
 
     async fn subscribe_to_updates(
         strategies: &[Strategy],
-        mktdata: &Arc<MktData>,
+        mktdata: &Arc<RwLock<MktData>>,
         _cancel_token: &CancellationToken,
     ) {
-        async fn subscribe<Strat>(strategy: &Strat, mktdata: &Arc<MktData>)
+        async fn subscribe<Strat>(strategy: &Strat, mktdata: &Arc<RwLock<MktData>>)
         where
             Strat: StrategyMeta + Sync + Send,
         {
-            if let Err(err) = mktdata
-                .as_ref()
-                .subscribe_to_options_mktdata(
-                    &strategy.get_symbols(),
-                    strategy.get_instrument_type(),
-                )
-                .await
-            {
-                error!(
-                    "Failed to subscribe to mktdata for symbol: {}, error: {}",
-                    strategy.get_symbols().join(", "),
-                    err
-                );
-                //TODO: Should we restart the app
-                //cancel_token.cancel();
+            for symbol in strategy.get_symbols() {
+                if let Err(err) = mktdata
+                    .write()
+                    .await
+                    .subscribe_to_options_mktdata(symbol, symbol, strategy.get_instrument_type())
+                    .await
+                {
+                    error!(
+                        "Failed to subscribe to mktdata for symbol: {}, error: {}",
+                        symbol, err
+                    );
+                }
             }
         }
         for strategy in strategies {
@@ -319,22 +349,26 @@ impl Strategies {
         where
             Strat: StrategyMeta,
         {
-            orders.liquidate_position(&strat).await
+            let price_effect = match strat.get_position().legs[0].direction() {
+                Direction::Short => PriceEffect::Credit,
+                Direction::Long => PriceEffect::Debit,
+            };
+            orders.liquidate_position(strat, price_effect).await
         }
 
         match strategy {
             Strategy::Credit(strat) => {
-                if strat.should_exit(mktdata).await? {
+                if strat.should_exit(mktdata).await {
                     return send_liquidate(strat, orders).await;
                 }
             }
             Strategy::Calendar(strat) => {
-                if strat.should_exit(mktdata).await? {
+                if strat.should_exit(mktdata).await {
                     return send_liquidate(strat, orders).await;
                 }
             }
             Strategy::Condor(strat) => {
-                if strat.should_exit(mktdata).await? {
+                if strat.should_exit(mktdata).await {
                     return send_liquidate(strat, orders).await;
                 }
             }

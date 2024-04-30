@@ -34,9 +34,8 @@ impl Middleware for LoggingMiddleware {
         for (name, value) in req.iter() {
             info!("Headers {}: {}", name, value);
         }
-
         let res = next.run(req, client).await?;
-        info!("Response: {:?}", res);
+        debug!("Response: {:?}", res);
 
         surf::Result::Ok(res)
     }

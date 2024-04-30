@@ -193,8 +193,10 @@ impl FutureOptionSymbol {
         };
         let option_type = OptionType::parse(parts[2].chars().nth(6).unwrap());
 
-        let strike_price = match parts[2][7..].to_string().parse::<f64>() {
-            Ok(strike) => strike.round(),
+        //TODO fix the strike price
+        let test = parts[2][7..].to_string();
+        let strike_price: f64 = match parts[2][7..].to_string().parse::<f64>() {
+            Ok(strike) => (strike * 1e4).round() / 1e4,
             Err(_) => bail!("Invalid strike price format"),
         };
 

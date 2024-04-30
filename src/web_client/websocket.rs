@@ -94,7 +94,6 @@ impl<Session> WebSocketClient<Session> {
             loop {
                 tokio::select! {
                     msg = read.next() => {
-                        dbg!("Chris from the wire, {:?}", &msg);
                         Self::handle_socket_messages(msg, session.clone(), cancel_token.clone()).await;
                     }
                     msg = to_ws.recv() => {

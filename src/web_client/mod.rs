@@ -78,38 +78,36 @@ impl From<EndPoint> for i32 {
 }
 
 #[derive(FromRow, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-struct AuthCreds {
+struct LoginCreds {
     #[serde(rename = "login")]
     username: String,
-    #[serde(skip)]
-    account: String,
-    #[serde(skip)]
-    session: String,
-    #[serde(rename = "remember-token")]
-    remember: String,
-    #[sqlx(flatten)]
-    #[serde(skip)]
-    endpoint: EndPoint,
+    password: String,
     #[serde(rename = "remember-me")]
     #[sqlx(default)]
     remember_me: bool,
-    #[serde(skip)]
-    last: DateTime<Utc>,
 }
 
-impl Default for AuthCreds {
-    fn default() -> Self {
-        Self {
-            username: String::default(),
-            account: String::default(),
-            session: String::default(),
-            remember: String::default(),
-            endpoint: EndPoint::default(),
-            remember_me: true,
-            last: DateTime::default(),
-        }
-    }
+#[derive(FromRow, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+struct LoginAuthToken {
+    #[serde(rename = "login")]
+    username: String,
+    #[serde(rename = "remember-token")]
+    remember: String,
+    #[serde(rename = "remember-me")]
+    #[sqlx(default)]
+    remember_me: bool,
 }
+
+#[derive(FromRow, Clone, PartialEq, Eq, Debug)]
+struct DbStoredCreds {
+    username: String,
+    account: String,
+    session: String,
+    remember: String,
+    #[sqlx(flatten)]
+    endpoint: EndPoint,
+}
+
 #[derive(FromRow, Clone, Default, Debug, Serialize, Deserialize)]
 struct AuthResponse {
     #[sqlx(flatten)]
@@ -160,23 +158,25 @@ impl WebClient {
         settings: Settings,
         db: &DBClient,
     ) -> Result<()> {
-        let creds = Self::fetch_auth_from_db(&settings.username, settings.endpoint, db).await?;
+        let mut creds = Self::fetch_auth_from_db(&settings.username, settings.endpoint, db).await?;
         assert!(creds.len() == 1);
-        let data = &creds[0];
+        let data = &mut creds[0];
 
-        let updates = match Self::refresh_session_token(&self.http_client, data.clone()).await {
-            CoreResult::Ok(val) => {
-                Self::update_auth_from_db(
-                    &val.data.session,
-                    &val.data.remember,
-                    settings.endpoint,
-                    db,
-                )
-                .await?;
-                val
-            }
-            Err(err) => bail!("Failed to update refresh token, error: {}", err),
-        };
+        let password = std::env::var("TASTY_PASSWORD").ok();
+        let updates =
+            match Self::initialise_session(&self.http_client, data.clone(), password).await {
+                CoreResult::Ok(val) => {
+                    Self::update_auth_from_db(
+                        &val.data.session,
+                        &val.data.remember,
+                        settings.endpoint,
+                        db,
+                    )
+                    .await?;
+                    val
+                }
+                Err(err) => bail!("Failed to update refresh token, error: {}", err),
+            };
         self.session = updates.data.session;
         self.account = data.account.clone();
 
@@ -240,7 +240,7 @@ impl WebClient {
         &self.account
     }
 
-    pub async fn subscribe_to_symbol(&self, symbol: &str, event_type: &str) -> Result<()> {
+    pub async fn subscribe_to_symbol(&self, symbol: &str, event_type: Vec<&str>) -> Result<()> {
         let client = self.mktdata.as_ref().unwrap();
         client
             .get_session()
@@ -253,11 +253,11 @@ impl WebClient {
         username: &str,
         endpoint: EndPoint,
         db: &DBClient,
-    ) -> Result<Vec<AuthCreds>> {
+    ) -> Result<Vec<DbStoredCreds>> {
         let columns = vec!["username", "endpoint"];
 
         let stmt = SqlQueryBuilder::prepare_fetch_statement("tasty_auth", &columns);
-        match sqlx::query_as::<_, AuthCreds>(&stmt)
+        match sqlx::query_as::<_, DbStoredCreds>(&stmt)
             .bind(username.to_string())
             .bind::<i32>(endpoint.into())
             .fetch_all(&db.pool)
@@ -280,7 +280,7 @@ impl WebClient {
     ) -> Result<()> {
         let stmt = SqlQueryBuilder::prepare_update_statement(
             "tasty_auth",
-            &vec!["session", "remember", "endpoint"],
+            &["session", "remember", "endpoint"],
         );
 
         debug!(
@@ -299,16 +299,51 @@ impl WebClient {
         }
     }
 
-    async fn refresh_session_token(
+    async fn initialise_session(
         http_client: &HttpClient,
-        mut data: AuthCreds,
+        data: DbStoredCreds,
+        password: Option<String>,
     ) -> Result<Wrapper<AuthResponse>> {
-        data.remember_me = true;
-        let refresh_token = http_client
-            .post::<AuthCreds, Wrapper<AuthResponse>>("sessions", data, None)
-            .await?;
-        info!("Refresh token success, token: {:?}", refresh_token);
-        Ok(refresh_token)
+        async fn init_session_with_password(
+            username: &str,
+            password: String,
+            http_client: &HttpClient,
+        ) -> Result<Wrapper<AuthResponse>> {
+            let creds = LoginCreds {
+                username: username.to_string(),
+                password,
+                remember_me: true,
+            };
+            let result = http_client
+                .post::<LoginCreds, Wrapper<AuthResponse>>("sessions", creds, None)
+                .await?;
+            info!("Refresh token success, token: {:?}", result);
+            Ok(result)
+        }
+
+        async fn init_session_with_token(
+            username: &str,
+            remember: &str,
+            http_client: &HttpClient,
+        ) -> Result<Wrapper<AuthResponse>> {
+            let creds = LoginAuthToken {
+                username: username.to_string(),
+                remember: remember.to_string(),
+                remember_me: true,
+            };
+            let result = http_client
+                .post::<LoginAuthToken, Wrapper<AuthResponse>>("sessions", creds, None)
+                .await?;
+            info!("Refresh token success, token: {:?}", result);
+            Ok(result)
+        }
+
+        match password {
+            Some(password) => {
+                init_session_with_password(&data.username, password, http_client).await
+            }
+            None => init_session_with_token(&data.username, &data.remember, http_client).await,
+        }
     }
 
     async fn get_api_quote_token(

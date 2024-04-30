@@ -9,10 +9,12 @@ use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
 
+use crate::mktdata::tt_api::FeedEvent;
 use crate::positions::InstrumentType;
 
 use super::web_client::WebClient;
@@ -22,7 +24,6 @@ pub(crate) mod tt_api {
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     pub struct Message {
-        pub uid: String,
         #[serde(rename = "type")]
         pub message_type: String,
         pub channel: i32,
@@ -36,15 +37,29 @@ pub(crate) mod tt_api {
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(tag = "eventType")]
     pub enum FeedEvent {
-        QuoteEvent(QuoteEvent),
-        GreeksEvent(GreeksEvent),
+        #[serde(rename = "Quote")]
+        QuoteEvent(Quote),
+        #[serde(rename = "Greeks")]
+        GreeksEvent(Greeks),
+    }
+
+    impl PartialEq for FeedEvent {
+        fn eq(&self, other: &Self) -> bool {
+            matches!(
+                (self, other),
+                (FeedEvent::QuoteEvent(_), FeedEvent::QuoteEvent(_))
+                    | (FeedEvent::GreeksEvent(_), FeedEvent::GreeksEvent(_))
+            )
+        }
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    pub struct QuoteEvent {
-        pub event_type: String,
+    #[serde(rename_all = "camelCase")]
+    pub struct Quote {
+        pub event_symbol: String,
+        pub event_time: f64,
         pub sequence: f64,
         pub time_nano_part: f64,
         pub bid_time: f64,
@@ -55,15 +70,11 @@ pub(crate) mod tt_api {
         pub ask_exchange_code: String,
         pub ask_price: f64,
         pub ask_size: f64,
-        pub event_symbol: String,
-        pub event_time: f64,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    pub struct GreeksEvent {
-        pub uid: String,
-        pub event_type: String,
+    #[serde(rename_all = "camelCase")]
+    pub struct Greeks {
         pub event_flags: f64,
         pub index: f64,
         pub time: f64,
@@ -173,8 +184,9 @@ const UTF8_ECODING: &AsciiSet = &CONTROLS.add(b' ').add(b'/');
 
 struct Snapshot {
     symbol: String,
+    underlying: String,
     streamer_symbol: String,
-    mktdata: Option<tt_api::FeedDataMessage>,
+    mktdata: Vec<tt_api::FeedEvent>,
 }
 
 pub(crate) struct MktData {
@@ -186,7 +198,7 @@ impl MktData {
     pub fn new(client: Arc<WebClient>, cancel_token: CancellationToken) -> Self {
         let mut receiver = client.subscribe_to_events();
         let events = Arc::new(Mutex::new(Vec::new()));
-        let mut event_writer = Arc::clone(&events);
+        let event_writer = Arc::clone(&events);
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -217,38 +229,37 @@ impl MktData {
 
     pub async fn subscribe_to_equity_mktdata(&mut self, symbol: &str) -> anyhow::Result<()> {
         self.web_client
-            .subscribe_to_symbol(&symbol, "Quotes")
+            .subscribe_to_symbol(&symbol, vec!["Quote"])
             .await?;
-        Self::stash_subscription(&mut self.events, symbol, symbol).await;
+        Self::stash_subscription(&mut self.events, symbol, symbol, symbol).await;
         Ok(())
     }
 
     pub async fn subscribe_to_options_mktdata(
         &mut self,
-        symbols: Vec<&str>,
+        symbol: &str,
+        underlying: &str,
         instrument_type: InstrumentType,
     ) -> anyhow::Result<()> {
-        for symbol in symbols {
-            let streamer_symbol = self.get_streamer_symbol(symbol, instrument_type).await?;
-            info!(
-                "Subscribing to mktdata events for symbol: {}",
-                streamer_symbol
-            );
-            self.web_client
-                .subscribe_to_symbol(&streamer_symbol, "Quotes")
-                .await?;
-            Self::stash_subscription(&mut self.events, symbol, &streamer_symbol).await;
-        }
+        let streamer_symbol = self.get_streamer_symbol(symbol, instrument_type).await?;
+        info!(
+            "Subscribing to mktdata events for symbol: {}",
+            streamer_symbol
+        );
+        self.web_client
+            .subscribe_to_symbol(&streamer_symbol, vec!["Quote", "Greeks"])
+            .await?;
+        Self::stash_subscription(&mut self.events, symbol, underlying, &streamer_symbol).await;
         Ok(())
     }
 
-    pub async fn get_snapshot_data(&self, symbol: &str) -> Option<tt_api::FeedDataMessage> {
-        self.events
-            .lock()
-            .await
+    pub async fn get_snapshot_events(&self, underlying: &str) -> Vec<FeedEvent> {
+        let reader = self.events.lock().await;
+        reader
             .iter()
-            .find(|snapshot| snapshot.symbol.eq(symbol))
-            .and_then(|snapshot| snapshot.mktdata.clone())
+            .find(|snapshot| snapshot.underlying.eq(underlying))
+            .map(|snapshot| snapshot.mktdata.clone())
+            .expect("Failed to pull mktdata from snapshot")
     }
 
     async fn get_streamer_symbol(
@@ -285,12 +296,14 @@ impl MktData {
     async fn stash_subscription(
         events: &mut Arc<Mutex<Vec<Snapshot>>>,
         symbol: &str,
+        underlying: &str,
         streamer_symbol: &str,
     ) {
         let snapshot = Snapshot {
             symbol: symbol.to_string(),
+            underlying: underlying.to_string(),
             streamer_symbol: streamer_symbol.to_string(),
-            mktdata: None,
+            mktdata: Vec::new(),
         };
         events.lock().await.push(snapshot);
     }
@@ -300,19 +313,30 @@ impl MktData {
         msg: String,
         _cancel_token: &CancellationToken,
     ) {
-        if let serde_json::Result::Ok(msg) = serde_json::from_str::<tt_api::FeedDataMessage>(&msg) {
-            info!("Last mktdata message received, msg: {:?}", msg);
-            events.lock().await.iter_mut().for_each(|snapshot| {
-                for event in &msg.data {
-                    if let tt_api::FeedEvent::QuoteEvent(quote) = &event {
-                        if snapshot.symbol.eq(&quote.event_symbol) {
-                            snapshot.mktdata = Some(msg.clone());
-                        }
-                    }
-                }
-            });
-        } else {
-            info!("No Last mktdata message received, msg: {:?}", msg);
-        }
+        match serde_json::from_str::<tt_api::FeedDataMessage>(&msg) {
+            serde_json::Result::Ok(mut msg) => {
+                debug!("Last mktdata message received, msg: {:?}", msg);
+
+                let mut writer = events.lock().await;
+                writer.iter_mut().for_each(|snapshot| {
+                    msg.data.iter_mut().for_each(|event| {
+                        snapshot.mktdata.iter_mut().for_each(|data| {
+                            let _ = match (&event, &data) {
+                                (FeedEvent::QuoteEvent(_), FeedEvent::QuoteEvent(_)) => {
+                                    *data = event.clone()
+                                }
+                                (FeedEvent::GreeksEvent(_), FeedEvent::GreeksEvent(_)) => {
+                                    *data = event.clone()
+                                }
+                                _ => (),
+                            };
+                        })
+                    })
+                });
+            }
+            serde_json::Result::Err(err) => {
+                info!("No Last mktdata message received, error: {:?}", err);
+            }
+        };
     }
 }

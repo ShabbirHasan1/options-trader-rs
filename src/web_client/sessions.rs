@@ -417,21 +417,22 @@ impl MktdataSession {
         }
     }
 
-    pub fn subscribe(&mut self, symbol: Option<&str>, event_type: &str) -> anyhow::Result<()> {
+    pub fn subscribe(&mut self, symbol: Option<&str>, event_type: Vec<&str>) -> anyhow::Result<()> {
         if let Some(symbol) = symbol {
             self.waiting_on_subscription.push(symbol.to_string());
         }
         if !self.is_alive || self.waiting_on_subscription.is_empty() {
             return anyhow::Ok(());
         }
-        let subscriptions = self
-            .waiting_on_subscription
-            .iter()
-            .map(|symbol| AddItem {
-                symbol: symbol.clone(),
-                msg_type: event_type.to_string(),
+        let mut subscriptions = Vec::new();
+        self.waiting_on_subscription.iter().for_each(|symbol| {
+            event_type.iter().for_each(|event| {
+                subscriptions.push(AddItem {
+                    symbol: symbol.clone(),
+                    msg_type: event.to_string(),
+                })
             })
-            .collect();
+        });
         let subscription = md_api::FeedSubscription {
             msg: Header {
                 msg_type: "FEED_SUBSCRIPTION".to_string(),

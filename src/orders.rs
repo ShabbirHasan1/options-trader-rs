@@ -1,14 +1,15 @@
+use anyhow::bail;
 use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
-use tracing::Instrument;
 
 use crate::mktdata::tt_api::FeedEvent;
 use crate::mktdata::MktData;
@@ -137,14 +138,14 @@ impl fmt::Display for OrderType {
 
 pub struct Orders {
     web_client: Arc<WebClient>,
-    mkt_data: Arc<MktData>,
+    mkt_data: Arc<RwLock<MktData>>,
     orders: Vec<tt_api::Order>,
 }
 
 impl Orders {
     pub fn new(
         web_client: Arc<WebClient>,
-        mkt_data: Arc<MktData>,
+        mkt_data: Arc<RwLock<MktData>>,
         cancel_token: CancellationToken,
     ) -> Self {
         let mut receiver = web_client.subscribe_to_events();
@@ -185,14 +186,14 @@ impl Orders {
         Meta: StrategyMeta,
     {
         // check to see if order in flight
-        if (self.orders.iter().any(|order| {
+        if self.orders.iter().any(|order| {
             order.legs.iter().any(|leg| {
                 meta_data
                     .get_symbols()
                     .iter()
                     .any(|symbol| *symbol == leg.symbol)
             })
-        })) {
+        }) {
             info!("Order {} already in flight", meta_data.get_underlying());
             return anyhow::Result::Ok(());
         }
@@ -251,34 +252,33 @@ impl Orders {
 
     async fn get_midprice(
         strategy_type: StrategyType,
-        mktdata: &Arc<MktData>,
+        mktdata: &Arc<RwLock<MktData>>,
         order: &tt_api::Order,
     ) -> Result<f64> {
+        let reader = mktdata.read().await;
         let mut calculated_midprice = 0.0;
         match strategy_type {
             StrategyType::CreditSpread => {
                 for leg in &order.legs {
-                    if let Some(snapshot) = mktdata.get_snapshot_data(leg.symbol.as_str()).await {
-                        let midprice = snapshot
-                            .data
-                            .iter()
-                            .find(|event| match event {
-                                FeedEvent::QuoteEvent(event) => event.event_symbol == leg.symbol,
-                                _ => false,
-                            })
-                            .and_then(|event| {
-                                if let FeedEvent::QuoteEvent(quote) = event {
-                                    Some((quote.bid_price + quote.ask_price) / 2.0)
-                                } else {
-                                    None
-                                }
-                            });
-                        calculated_midprice += midprice.unwrap();
-                    }
+                    let events = reader.get_snapshot_events(leg.symbol.as_str()).await;
+                    let midprice = events
+                        .iter()
+                        .find(|event| match event {
+                            FeedEvent::QuoteEvent(_) => true,
+                            _ => false,
+                        })
+                        .and_then(|event| match event {
+                            FeedEvent::QuoteEvent(quote) => {
+                                Some((quote.bid_price + quote.ask_price) / 2.0)
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    calculated_midprice += midprice;
                 }
                 return Ok(calculated_midprice);
             }
-            _ => anyhow::Result::Err(anyhow::anyhow!("Invalid strategy type")),
+            _ => bail!("Invalid strategy type"),
         }
     }
 
