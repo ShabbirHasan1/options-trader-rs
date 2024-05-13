@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
 use std::str::FromStr;
+use tracing::debug;
 use tracing::info;
 
 pub(crate) mod tt_api {
@@ -178,7 +179,7 @@ impl FutureOptionSymbol {
             );
         }
 
-        let parts: Vec<&str> = symbol[2..].split_whitespace().collect();
+        let parts: Vec<&str> = symbol[1..].split_whitespace().collect();
         if parts.len() != 3 {
             bail!(
                 "Invalid number of tokens parsing future option symbol: {} tokens: {}",
@@ -195,7 +196,7 @@ impl FutureOptionSymbol {
         let option_type = OptionType::parse(parts[2].chars().nth(6).unwrap());
 
         //TODO fix the strike price
-        let strike_price = Decimal::from_str(&parts[2][7..].to_string())?;
+        let strike_price = Decimal::from_str(&parts[2][7..])?;
 
         Ok(Box::new(FutureOptionSymbol {
             symbol: symbol.to_string(),
@@ -337,7 +338,9 @@ impl ComplexSymbol for EquityOptionSymbol {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InstrumentType {
     Equity,
+    EquityOption,
     Future,
+    FutureOption,
 }
 
 impl fmt::Display for InstrumentType {
@@ -345,6 +348,8 @@ impl fmt::Display for InstrumentType {
         let instrument_type = match self {
             InstrumentType::Equity => String::from("Equity"),
             InstrumentType::Future => String::from("Future"),
+            InstrumentType::EquityOption => String::from("EquityOption "),
+            InstrumentType::FutureOption => String::from("FutureOption "),
         };
         write!(f, "{}", instrument_type)
     }
@@ -369,8 +374,10 @@ impl fmt::Display for PriceEffect {
 impl InstrumentType {
     pub fn get_symbol_type(instrument_type: &str) -> InstrumentType {
         match instrument_type {
-            "Equity Option" => InstrumentType::Equity,
-            "Future Option" => InstrumentType::Future,
+            "Equity" => InstrumentType::Equity,
+            "Future" => InstrumentType::Future,
+            "Equity Option" => InstrumentType::EquityOption,
+            "Future Option" => InstrumentType::FutureOption,
             _ => panic!("Unsupported Type"),
         }
     }
@@ -400,24 +407,27 @@ impl Position {
     }
 
     fn parse_complex_symbols(legs: &[tt_api::Leg]) -> Vec<Box<dyn ComplexSymbol>> {
-        let symbols = legs
+        let symbols: Vec<Box<dyn ComplexSymbol>> = legs
             .iter()
-            .map(|leg| {
+            .filter_map(|leg| {
                 match InstrumentType::get_symbol_type(
                     leg.instrument_type.as_ref().unwrap().as_str(),
                 ) {
-                    InstrumentType::Equity => EquityOptionSymbol::parse(
-                        &leg.symbol,
-                        leg.quantity_direction.as_ref().unwrap(),
-                    )
-                    .unwrap()
-                        as Box<dyn ComplexSymbol>,
-                    InstrumentType::Future => FutureOptionSymbol::parse(
-                        &leg.symbol,
-                        leg.quantity_direction.as_ref().unwrap(),
-                    )
-                    .unwrap()
-                        as Box<dyn ComplexSymbol>,
+                    InstrumentType::EquityOption => Some(
+                        EquityOptionSymbol::parse(
+                            &leg.symbol,
+                            leg.quantity_direction.as_ref().unwrap(),
+                        )
+                        .unwrap(),
+                    ),
+                    InstrumentType::FutureOption => Some(
+                        FutureOptionSymbol::parse(
+                            &leg.symbol,
+                            leg.quantity_direction.as_ref().unwrap(),
+                        )
+                        .unwrap(),
+                    ),
+                    InstrumentType::Future | InstrumentType::Equity => None,
                 }
             })
             .collect();

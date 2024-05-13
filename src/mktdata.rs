@@ -1,5 +1,7 @@
+use anyhow::anyhow;
 use anyhow::Ok;
 use anyhow::Result;
+use core::fmt;
 use percent_encoding::utf8_percent_encode;
 use percent_encoding::AsciiSet;
 use percent_encoding::CONTROLS;
@@ -135,7 +137,7 @@ pub(crate) mod tt_api {
         pub option_type: Option<String>,
         pub symbol: String,
         pub is_vanilla: Option<bool>,
-        pub streamer_symbol: String,
+        pub streamer_symbol: Option<String>,
         pub display_factor: Option<String>,
         pub stops_trading_at: Option<String>,
         pub exercise_style: Option<String>,
@@ -163,7 +165,7 @@ pub(crate) mod tt_api {
         pub option_type: Option<String>,
         pub market_time_instrument_collection: Option<String>,
         pub symbol: Option<String>,
-        pub streamer_symbol: String,
+        pub streamer_symbol: Option<String>,
         pub expiration_type: Option<String>,
         pub shares_per_contract: Option<i32>,
         pub stops_trading_at: Option<String>,
@@ -172,15 +174,155 @@ pub(crate) mod tt_api {
         pub option_chain_type: Option<String>,
     }
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct ResponseFutureOption {
-        // pub message: Message,
-        pub data: FutureOption,
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub struct TickSizes {
+        pub value: Option<String>,
+        pub threshold: Option<String>,
+        pub symbol: Option<String>,
     }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub struct FutureETFEquivalent {
+        pub symbol: Option<String>,
+        pub share_quantity: Option<i32>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub struct ExchangeData {}
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub struct OptionTickSizes {
+        pub value: Option<String>,
+        pub threshold: Option<String>,
+        pub symbol: Option<String>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub struct FutureEtfEquivalent {
+        pub symbol: Option<String>,
+        pub share_quantity: Option<u32>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub struct TickSize {
+        pub value: Option<String>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub struct Roll {
+        pub name: Option<String>,
+        pub active_count: Option<u32>,
+        pub cash_settled: Option<bool>,
+        pub business_days_offset: Option<u32>,
+        pub first_notice: Option<bool>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub struct FutureProduct {
+        pub root_symbol: Option<String>,
+        pub code: Option<String>,
+        pub description: Option<String>,
+        pub clearing_code: Option<String>,
+        pub clearing_exchange_code: Option<String>,
+        pub clearport_code: Option<String>,
+        pub legacy_code: Option<String>,
+        pub exchange: Option<String>,
+        pub legacy_exchange_code: Option<String>,
+        pub product_type: Option<String>,
+        pub listed_months: Option<Vec<String>>,
+        pub active_months: Option<Vec<String>>,
+        pub notional_multiplier: Option<String>,
+        pub tick_size: Option<String>,
+        pub display_factor: Option<String>,
+        pub streamer_exchange_code: Option<String>,
+        pub small_notional: Option<bool>,
+        pub back_month_first_calendar_symbol: Option<bool>,
+        pub first_notice: Option<bool>,
+        pub cash_settled: Option<bool>,
+        pub security_group: Option<String>,
+        pub market_sector: Option<String>,
+        pub supported: Option<bool>,
+        pub roll: Option<Roll>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub struct SpreadTickSize {
+        pub value: Option<String>,
+        pub symbol: Option<String>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub struct Future {
+        pub symbol: Option<String>,
+        pub product_code: Option<String>,
+        pub contract_size: Option<String>,
+        pub tick_size: Option<String>,
+        pub notional_multiplier: Option<String>,
+        pub main_fraction: Option<String>,
+        pub sub_fraction: Option<String>,
+        pub display_factor: Option<String>,
+        pub last_trade_date: Option<String>,
+        pub expiration_date: Option<String>,
+        pub closing_only_date: Option<String>,
+        pub active: Option<bool>,
+        pub active_month: Option<bool>,
+        pub next_active_month: Option<bool>,
+        pub is_closing_only: Option<bool>,
+        pub stops_trading_at: Option<String>,
+        pub expires_at: Option<String>,
+        pub product_group: Option<String>,
+        pub exchange: Option<String>,
+        pub streamer_exchange_code: Option<String>,
+        pub streamer_symbol: Option<String>,
+        pub back_month_first_calendar_symbol: Option<bool>,
+        pub is_tradeable: Option<bool>,
+        pub future_etf_equivalent: Option<FutureEtfEquivalent>,
+        pub future_product: Option<FutureProduct>,
+        pub tick_sizes: Option<Vec<TickSize>>,
+        pub option_tick_sizes: Option<Vec<TickSize>>,
+        pub spread_tick_sizes: Option<Vec<SpreadTickSize>>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub struct Equity {
+        pub halted_at: Option<String>,
+        pub instrument_type: Option<String>,
+        pub tick_sizes: Option<TickSizes>,
+        pub is_illiquid: Option<bool>,
+        pub active: Option<bool>,
+        pub is_closing_only: Option<bool>,
+        pub short_description: Option<String>,
+        pub listed_market: Option<String>,
+        pub is_index: Option<bool>,
+        pub is_etf: Option<bool>,
+        pub market_time_instrument_collection: Option<String>,
+        pub is_options_closing_only: Option<bool>,
+        pub symbol: Option<String>,
+        pub borrow_rate: Option<f64>,
+        pub streamer_symbol: Option<String>,
+        pub option_tick_sizes: Option<OptionTickSizes>,
+        pub lendability: Option<String>,
+        pub stops_trading_at: Option<String>,
+        pub is_fractional_quantity_eligible: Option<bool>,
+        pub description: Option<String>,
+    }
+
     #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct ResponseEquityOption {
+    pub struct Response<T> {
         // pub message: Message,
-        pub data: EquityOption,
+        pub data: T,
+        pub context: String,
     }
 }
 
@@ -232,18 +374,25 @@ impl MktData {
         }
     }
 
-    pub async fn subscribe_to_equity_mktdata(
+    pub async fn subscribe_to_underlying_mktdata(
         &mut self,
         symbol: &str,
         instrument_type: InstrumentType,
     ) -> anyhow::Result<()> {
-        if let InstrumentType::Future = instrument_type {
+        if let InstrumentType::Equity = instrument_type {
             return Ok(());
         }
+
+        let streamer_symbol = self.get_streamer_symbol(symbol, instrument_type).await?;
+        info!(
+            "Subscribing to mktdata events for symbol: {}",
+            streamer_symbol
+        );
+
         self.web_client
-            .subscribe_to_symbol(&symbol, vec!["Quote"])
+            .subscribe_to_symbol(&streamer_symbol, vec!["Quote"])
             .await?;
-        Self::stash_subscription(&mut self.events, symbol, symbol, symbol).await;
+        Self::stash_subscription(&mut self.events, symbol, symbol, &streamer_symbol).await;
         Ok(())
     }
 
@@ -253,7 +402,7 @@ impl MktData {
         underlying: &str,
         instrument_type: InstrumentType,
     ) -> anyhow::Result<()> {
-        if let InstrumentType::Future = instrument_type {
+        if let InstrumentType::Equity | InstrumentType::Future = instrument_type {
             return Ok(());
         }
         let streamer_symbol = self.get_streamer_symbol(symbol, instrument_type).await?;
@@ -286,29 +435,56 @@ impl MktData {
         instrument_type: InstrumentType,
     ) -> Result<String> {
         let symbol = utf8_percent_encode(symbol, UTF8_ECODING).to_string();
+
+        async fn streamer_symbol<Response>(web_client: &WebClient, endpoint: &str) -> Response
+        where
+            Response: for<'a> Deserialize<'a> + Serialize + fmt::Debug,
+        {
+            match web_client.get::<Response>(endpoint).await {
+                anyhow::Result::Ok(response) => response,
+                Err(e) => panic!("Error getting streamer symbol: {:?}", e),
+            }
+        }
+
         let streamer_symbol = match instrument_type {
             InstrumentType::Equity => {
-                self.web_client
-                    .get::<tt_api::ResponseEquityOption>(&format!(
-                        "instruments/equity-options/{}",
-                        symbol
-                    ))
-                    .await?
-                    .data
-                    .streamer_symbol
+                streamer_symbol::<tt_api::Response<tt_api::Equity>>(
+                    &self.web_client,
+                    &format!("instruments/equities/{}", symbol),
+                )
+                .await
+                .data
+                .streamer_symbol
             }
             InstrumentType::Future => {
-                self.web_client
-                    .get::<tt_api::ResponseFutureOption>(&format!(
-                        "instruments/future-options/{}",
-                        symbol
-                    ))
-                    .await?
-                    .data
-                    .streamer_symbol
+                streamer_symbol::<tt_api::Response<tt_api::Future>>(
+                    &self.web_client,
+                    &format!("instruments/futures/{}", symbol),
+                )
+                .await
+                .data
+                .streamer_symbol
+            }
+            InstrumentType::EquityOption => {
+                streamer_symbol::<tt_api::Response<tt_api::EquityOption>>(
+                    &self.web_client,
+                    &format!("instruments/equity-options/{}", symbol),
+                )
+                .await
+                .data
+                .streamer_symbol
+            }
+            InstrumentType::FutureOption => {
+                streamer_symbol::<tt_api::Response<tt_api::FutureOption>>(
+                    &self.web_client,
+                    &format!("instruments/future-options/{}", symbol),
+                )
+                .await
+                .data
+                .streamer_symbol
             }
         };
-        Ok(streamer_symbol)
+        streamer_symbol.ok_or(anyhow!("Error getting streamer symbol: {}", symbol))
     }
 
     async fn stash_subscription(
@@ -340,7 +516,7 @@ impl MktData {
 
         match serde_json::from_str::<tt_api::FeedDataMessage>(&msg) {
             serde_json::Result::Ok(mut msg) => {
-                debug!("Last mktdata message received, msg: {:?}", msg);
+                info!("Last mktdata message received, msg: {:?}", msg);
 
                 let mut writer = events.lock().await;
                 writer.iter_mut().for_each(|snapshot| {

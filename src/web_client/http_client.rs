@@ -79,7 +79,7 @@ impl HttpClient {
             );
         }
 
-        debug!("GET Response body: {:?}", response);
+        debug!("GET Response body: {:?}", response.body_string().await);
         match response.body_json::<Response>().await {
             surf::Result::Ok(val) => Ok(val),
             Err(err) => bail!(

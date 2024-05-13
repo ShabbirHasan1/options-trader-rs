@@ -18,7 +18,6 @@ use super::mktdata::MktData;
 use super::orders::Orders;
 use super::positions::Position;
 use super::web_client::WebClient;
-use crate::mktdata;
 use crate::mktdata::tt_api::FeedEvent;
 use crate::positions::tt_api as pos_api;
 use crate::positions::Direction;
@@ -26,7 +25,6 @@ use crate::positions::InstrumentType;
 use crate::positions::OptionType;
 use crate::positions::PriceEffect;
 use crate::positions::StrategyType;
-use crate::strategies;
 
 pub(crate) trait StrategyMeta: Sync + Send {
     fn get_underlying(&self) -> &str;
@@ -219,7 +217,25 @@ impl IronCondor {
         let call_strike = call_strikes.iter().min().unwrap_or(&Decimal::MAX);
         let put_strike = put_strikes.iter().max().unwrap_or(&Decimal::ZERO);
 
-        mid_price < *call_strike || mid_price > *put_strike
+        if mid_price < *call_strike {
+            info!(
+                "Should exit position: {} mid price: {} has crossed strike price: {}",
+                self.get_underlying(),
+                mid_price,
+                *call_strike
+            );
+            return true;
+        }
+        if mid_price > *put_strike {
+            info!(
+                "Should exit position: {} mid price: {} has crossed strike price: {}",
+                self.get_underlying(),
+                mid_price,
+                *put_strike
+            );
+            return true;
+        }
+        false
     }
 
     fn print(&self) {
@@ -334,7 +350,7 @@ impl Strategies {
             if let Err(err) = mktdata
                 .write()
                 .await
-                .subscribe_to_equity_mktdata(
+                .subscribe_to_underlying_mktdata(
                     strategy.get_underlying(),
                     strategy.get_instrument_type(),
                 )
@@ -408,14 +424,14 @@ impl Strategies {
             //         }
             //     }
             // }
-            // Strategy::Condor(strat) => {
-            //     if strat.should_exit(mktdata).await {
-            //         match send_liquidate(strat, orders).await {
-            //             Ok(val) => val,
-            //             Err(err) => error!("Failed to liquidate position, error: {}", err),
-            //         }
-            //     }
-            // }
+            Strategy::Condor(strat) => {
+                if strat.should_exit(mktdata).await {
+                    match send_liquidate(strat, orders).await {
+                        Ok(val) => val,
+                        Err(err) => error!("Failed to liquidate position, error: {}", err),
+                    }
+                }
+            }
             _ => (),
         }
         Ok(())
