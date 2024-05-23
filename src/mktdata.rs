@@ -374,7 +374,7 @@ impl MktData {
         }
     }
 
-    pub async fn subscribe_to_underlying_mktdata(
+    pub async fn subscribe_to_underlying(
         &mut self,
         symbol: &str,
         instrument_type: InstrumentType,
@@ -396,13 +396,13 @@ impl MktData {
         Ok(())
     }
 
-    pub async fn subscribe_to_options_mktdata(
+    pub async fn subscribe_to_option(
         &mut self,
         symbol: &str,
         underlying: &str,
         instrument_type: InstrumentType,
     ) -> anyhow::Result<()> {
-        if let InstrumentType::Equity | InstrumentType::Future = instrument_type {
+        if let InstrumentType::Equity = instrument_type {
             return Ok(());
         }
         let streamer_symbol = self.get_streamer_symbol(symbol, instrument_type).await?;
@@ -419,6 +419,11 @@ impl MktData {
 
     pub async fn get_snapshot_events(&self, symbol: &str) -> Vec<FeedEvent> {
         let reader = self.events.lock().await;
+        // for snapshot in reader.iter() {
+        //     if snapshot.symbol.eq(symbol) {
+        //         return snapshot.mktdata.clone();
+        //     }
+        // }
         let result = reader
             .iter()
             .find(|snapshot| snapshot.symbol.eq(symbol))
@@ -516,7 +521,7 @@ impl MktData {
 
         match serde_json::from_str::<tt_api::FeedDataMessage>(&msg) {
             serde_json::Result::Ok(mut msg) => {
-                info!("Last mktdata message received, msg: {:?}", msg);
+                debug!("Last mktdata message received, msg: {:?}", msg);
 
                 let mut writer = events.lock().await;
                 writer.iter_mut().for_each(|snapshot| {

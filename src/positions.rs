@@ -169,7 +169,7 @@ struct FutureOptionSymbol {
 }
 
 impl FutureOptionSymbol {
-    pub fn parse(symbol: &str, direction: &str) -> Result<Box<dyn ComplexSymbol>> {
+    pub fn parse(symbol: &str, direction: &str, quantity: i32) -> Result<Box<dyn ComplexSymbol>> {
         info!("Futures symbol: {}", symbol);
         if symbol.len() < 20 || !symbol.starts_with("./") {
             bail!(
@@ -205,7 +205,7 @@ impl FutureOptionSymbol {
             direction: Direction::parse(direction),
             option_type,
             strike_price,
-            quantity: 0,
+            quantity,
         }))
     }
 }
@@ -239,7 +239,7 @@ impl ComplexSymbol for FutureOptionSymbol {
     }
 
     fn instrument_type(&self) -> InstrumentType {
-        InstrumentType::Future
+        InstrumentType::FutureOption
     }
 
     fn quantity(&self) -> i32 {
@@ -263,7 +263,7 @@ struct EquityOptionSymbol {
 }
 
 impl EquityOptionSymbol {
-    pub fn parse(symbol: &str, direction: &str) -> Result<Box<dyn ComplexSymbol>> {
+    pub fn parse(symbol: &str, direction: &str, quantity: i32) -> Result<Box<dyn ComplexSymbol>> {
         if symbol.len() != 21 {
             bail!(
                 "Invalid format whilst parsing equity option symbol: {}, len: {}",
@@ -289,7 +289,7 @@ impl EquityOptionSymbol {
             direction: Direction::parse(direction),
             option_type,
             strike_price,
-            quantity: 0,
+            quantity,
         }))
     }
 }
@@ -323,7 +323,7 @@ impl ComplexSymbol for EquityOptionSymbol {
     }
 
     fn instrument_type(&self) -> InstrumentType {
-        InstrumentType::Equity
+        InstrumentType::EquityOption
     }
 
     fn quantity(&self) -> i32 {
@@ -417,6 +417,7 @@ impl Position {
                         EquityOptionSymbol::parse(
                             &leg.symbol,
                             leg.quantity_direction.as_ref().unwrap(),
+                            leg.quantity,
                         )
                         .unwrap(),
                     ),
@@ -424,6 +425,7 @@ impl Position {
                         FutureOptionSymbol::parse(
                             &leg.symbol,
                             leg.quantity_direction.as_ref().unwrap(),
+                            leg.quantity,
                         )
                         .unwrap(),
                     ),

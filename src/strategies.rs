@@ -347,12 +347,20 @@ impl Strategies {
         where
             Strat: StrategyMeta + Sync + Send,
         {
+            fn get_underlying_instrument_type(instrument_type: InstrumentType) -> InstrumentType {
+                match instrument_type {
+                    InstrumentType::EquityOption => InstrumentType::Equity,
+                    InstrumentType::FutureOption => InstrumentType::Future,
+                    _ => panic!("Unsupported Type"),
+                }
+            }
+
             if let Err(err) = mktdata
                 .write()
                 .await
-                .subscribe_to_underlying_mktdata(
+                .subscribe_to_underlying(
                     strategy.get_underlying(),
-                    strategy.get_instrument_type(),
+                    get_underlying_instrument_type(strategy.get_instrument_type()),
                 )
                 .await
             {
@@ -367,7 +375,7 @@ impl Strategies {
                 if let Err(err) = mktdata
                     .write()
                     .await
-                    .subscribe_to_options_mktdata(
+                    .subscribe_to_option(
                         symbol,
                         strategy.get_underlying(),
                         strategy.get_instrument_type(),
