@@ -160,8 +160,7 @@ impl<Session> WebSocketClient<Session> {
         Payload: Serialize + for<'a> Deserialize<'a>,
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
-        let output = (to_json(&payload)?).to_string();
-        info!("Sending to websocket: {}", output);
+        info!("Sending to websocket: {}", to_json(&payload)?);
         match self.session.read().await.to_ws().send(to_json(&payload)?) {
             Err(err) => anyhow::bail!("Error sending payload to websocket stream, error: {}", err),
             _ => anyhow::Ok(()),

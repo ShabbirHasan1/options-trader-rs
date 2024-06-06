@@ -26,6 +26,35 @@ use crate::positions::OptionType;
 use crate::positions::PriceEffect;
 use crate::positions::StrategyType;
 
+struct SpxSpread {
+    web_client: Arc<RwLock<WebClient>>,
+}
+
+impl SpxSpread {
+    fn new(web_client: Arc<RwLock<WebClient>>) -> Self {
+        Self::market_monitor();
+        Self { web_client }
+    }
+
+    fn market_monitor() {
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = sleep(Duration::from_secs(5)) => {
+                    // if orders.has_symbol() {
+                    //     return
+                    // }
+
+                    // let diretion = get_market_conditions();
+                    // if diretion.is_none() {
+                    //     return
+                    // }
+                    // let _ = orders.enter_position();
+                }
+            }
+        });
+    }
+}
+
 pub(crate) trait StrategyMeta: Sync + Send {
     fn get_underlying(&self) -> &str;
     fn get_symbols(&self) -> Vec<&str>;
@@ -63,7 +92,8 @@ impl CreditSpread {
                         OptionType::Call => strike_price < mid_price,
                         OptionType::Put => strike_price > mid_price,
                     };
-                    Some(result)
+                    Some(true)
+                    // Some(result)
                 }
                 _ => None,
             })
@@ -358,8 +388,9 @@ impl Strategies {
             if let Err(err) = mktdata
                 .write()
                 .await
-                .subscribe_to_underlying(
+                .subscribe_to_feed(
                     strategy.get_underlying(),
+                    vec!["Quote"].as_slice(),
                     get_underlying_instrument_type(strategy.get_instrument_type()),
                 )
                 .await
@@ -371,29 +402,30 @@ impl Strategies {
                 );
             }
 
-            for symbol in strategy.get_symbols() {
-                if let Err(err) = mktdata
-                    .write()
-                    .await
-                    .subscribe_to_option(
-                        symbol,
-                        strategy.get_underlying(),
-                        strategy.get_instrument_type(),
-                    )
-                    .await
-                {
-                    error!(
-                        "Failed to subscribe to mktdata for symbol: {}, error: {}",
-                        symbol, err
-                    );
-                }
-            }
+            // for symbol in strategy.get_symbols() {
+            //     if let Err(err) = mktdata
+            //         .write()
+            //         .await
+            //         .subscribe_to_feed(
+            //             symbol,
+            //             strategy.get_underlying(),
+            // vec!["Quote", "Greeks"].as_slice(),
+            //             strategy.get_instrument_type(),
+            //         )
+            //         .await
+            //     {
+            //         error!(
+            //             "Failed to subscribe to mktdata for symbol: {}, error: {}",
+            //             symbol, err
+            //         );
+            //     }
+            // }
         }
         for strategy in strategies {
             match &strategy {
                 Strategy::Credit(strat) => subscribe(strat, mktdata).await,
-                Strategy::Calendar(strat) => subscribe(strat, mktdata).await,
-                Strategy::Condor(strat) => subscribe(strat, mktdata).await,
+                // Strategy::Calendar(strat) => subscribe(strat, mktdata).await,
+                // Strategy::Condor(strat) => subscribe(strat, mktdata).await,
                 _ => (),
             }
         }
@@ -432,14 +464,14 @@ impl Strategies {
             //         }
             //     }
             // }
-            Strategy::Condor(strat) => {
-                if strat.should_exit(mktdata).await {
-                    match send_liquidate(strat, orders).await {
-                        Ok(val) => val,
-                        Err(err) => error!("Failed to liquidate position, error: {}", err),
-                    }
-                }
-            }
+            // Strategy::Condor(strat) => {
+            //     if strat.should_exit(mktdata).await {
+            //         match send_liquidate(strat, orders).await {
+            //             Ok(val) => val,
+            //             Err(err) => error!("Failed to liquidate position, error: {}", err),
+            //         }
+            //     }
+            // }
             _ => (),
         }
         Ok(())

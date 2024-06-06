@@ -240,7 +240,7 @@ impl WebClient {
         &self.account
     }
 
-    pub async fn subscribe_to_symbol(&self, symbol: &str, event_type: Vec<&str>) -> Result<()> {
+    pub async fn subscribe_to_symbol(&self, symbol: &str, event_type: &[&str]) -> Result<()> {
         let client = self.mktdata.as_ref().unwrap();
         client
             .get_session()

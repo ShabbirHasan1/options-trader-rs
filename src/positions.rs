@@ -169,8 +169,12 @@ struct FutureOptionSymbol {
 }
 
 impl FutureOptionSymbol {
-    pub fn parse(symbol: &str, direction: &str, quantity: i32) -> Result<Box<dyn ComplexSymbol>> {
-        info!("Futures symbol: {}", symbol);
+    pub fn parse(
+        symbol: &str,
+        underlying: &str,
+        direction: &str,
+        quantity: i32,
+    ) -> Result<Box<dyn ComplexSymbol>> {
         if symbol.len() < 20 || !symbol.starts_with("./") {
             bail!(
                 "Invalid format whilst parsing future option symbol: {} len: {}",
@@ -188,7 +192,6 @@ impl FutureOptionSymbol {
             );
         }
 
-        let underlying = parts[0].to_string();
         let expiration_date = match NaiveDate::parse_from_str(&parts[2][..6], "%y%m%d") {
             Ok(val) => val,
             Err(err) => bail!("Failed to parse date: {}, error: {}", parts[2], err),
@@ -263,7 +266,12 @@ struct EquityOptionSymbol {
 }
 
 impl EquityOptionSymbol {
-    pub fn parse(symbol: &str, direction: &str, quantity: i32) -> Result<Box<dyn ComplexSymbol>> {
+    pub fn parse(
+        symbol: &str,
+        underlying: &str,
+        direction: &str,
+        quantity: i32,
+    ) -> Result<Box<dyn ComplexSymbol>> {
         if symbol.len() != 21 {
             bail!(
                 "Invalid format whilst parsing equity option symbol: {}, len: {}",
@@ -272,7 +280,6 @@ impl EquityOptionSymbol {
             );
         }
 
-        let underlying = symbol[0..6].trim().to_string();
         let expiration_date = match NaiveDate::parse_from_str(&symbol[6..12], "%y%m%d") {
             Ok(val) => val,
             Err(err) => bail!("Failed to parse date: {}, error: {}", &symbol[6..12], err),
@@ -284,7 +291,7 @@ impl EquityOptionSymbol {
 
         Ok(Box::new(EquityOptionSymbol {
             symbol: symbol.to_string(),
-            underlying,
+            underlying: underlying.to_string(),
             expiration_date,
             direction: Direction::parse(direction),
             option_type,
@@ -398,8 +405,13 @@ impl fmt::Display for Position {
 
 impl Position {
     pub fn new(legs: Vec<tt_api::Leg>) -> Position {
-        let symbols = Self::parse_complex_symbols(&legs);
+        let mut symbols = Self::parse_complex_symbols(&legs);
         let strategy_type = Self::determine_strategy(&symbols, &legs);
+        symbols.sort_by(|a, b| {
+            b.strike_price()
+                .partial_cmp(&a.strike_price())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Self {
             legs: symbols,
             strategy_type,
@@ -413,22 +425,20 @@ impl Position {
                 match InstrumentType::get_symbol_type(
                     leg.instrument_type.as_ref().unwrap().as_str(),
                 ) {
-                    InstrumentType::EquityOption => Some(
-                        EquityOptionSymbol::parse(
-                            &leg.symbol,
-                            leg.quantity_direction.as_ref().unwrap(),
-                            leg.quantity,
-                        )
-                        .unwrap(),
-                    ),
-                    InstrumentType::FutureOption => Some(
-                        FutureOptionSymbol::parse(
-                            &leg.symbol,
-                            leg.quantity_direction.as_ref().unwrap(),
-                            leg.quantity,
-                        )
-                        .unwrap(),
-                    ),
+                    InstrumentType::EquityOption => EquityOptionSymbol::parse(
+                        &leg.symbol,
+                        leg.underlying_symbol.as_ref().unwrap().as_str(),
+                        leg.quantity_direction.as_ref().unwrap(),
+                        leg.quantity,
+                    )
+                    .ok(),
+                    InstrumentType::FutureOption => FutureOptionSymbol::parse(
+                        &leg.symbol,
+                        leg.underlying_symbol.as_ref().unwrap().as_str(),
+                        leg.quantity_direction.as_ref().unwrap(),
+                        leg.quantity,
+                    )
+                    .ok(),
                     InstrumentType::Future | InstrumentType::Equity => None,
                 }
             })

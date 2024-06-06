@@ -417,7 +417,7 @@ impl MktdataSession {
         }
     }
 
-    pub fn subscribe(&mut self, symbol: Option<&str>, event_type: Vec<&str>) -> anyhow::Result<()> {
+    pub fn subscribe(&mut self, symbol: Option<&str>, event_type: &[&str]) -> anyhow::Result<()> {
         if let Some(symbol) = symbol {
             self.waiting_on_subscription.push(symbol.to_string());
         }
@@ -508,7 +508,7 @@ impl WsSession for MktdataSession {
     where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
-        debug!("response {}", response);
+        info!("response {}", response);
         if let serde_json::Result::Ok(payload) = serde_json::from_str::<md_api::FeedData>(&response)
         {
             match payload.msg.msg_type.as_str() {

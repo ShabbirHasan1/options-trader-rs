@@ -195,14 +195,6 @@ pub(crate) mod tt_api {
 
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(rename_all = "kebab-case")]
-    pub struct OptionTickSizes {
-        pub value: Option<String>,
-        pub threshold: Option<String>,
-        pub symbol: Option<String>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
     pub struct FutureEtfEquivalent {
         pub symbol: Option<String>,
         pub share_quantity: Option<u32>,
@@ -309,9 +301,9 @@ pub(crate) mod tt_api {
         pub market_time_instrument_collection: Option<String>,
         pub is_options_closing_only: Option<bool>,
         pub symbol: Option<String>,
-        pub borrow_rate: Option<f64>,
+        pub borrow_rate: Option<String>,
         pub streamer_symbol: Option<String>,
-        pub option_tick_sizes: Option<OptionTickSizes>,
+        pub option_tick_sizes: Vec<TickSizes>,
         pub lendability: Option<String>,
         pub stops_trading_at: Option<String>,
         pub is_fractional_quantity_eligible: Option<bool>,
@@ -374,15 +366,12 @@ impl MktData {
         }
     }
 
-    pub async fn subscribe_to_underlying(
+    pub async fn subscribe_to_feed(
         &mut self,
         symbol: &str,
+        event_type: &[&str],
         instrument_type: InstrumentType,
     ) -> anyhow::Result<()> {
-        if let InstrumentType::Equity = instrument_type {
-            return Ok(());
-        }
-
         let streamer_symbol = self.get_streamer_symbol(symbol, instrument_type).await?;
         info!(
             "Subscribing to mktdata events for symbol: {}",
@@ -390,30 +379,9 @@ impl MktData {
         );
 
         self.web_client
-            .subscribe_to_symbol(&streamer_symbol, vec!["Quote"])
+            .subscribe_to_symbol(&streamer_symbol, event_type)
             .await?;
         Self::stash_subscription(&mut self.events, symbol, symbol, &streamer_symbol).await;
-        Ok(())
-    }
-
-    pub async fn subscribe_to_option(
-        &mut self,
-        symbol: &str,
-        underlying: &str,
-        instrument_type: InstrumentType,
-    ) -> anyhow::Result<()> {
-        if let InstrumentType::Equity = instrument_type {
-            return Ok(());
-        }
-        let streamer_symbol = self.get_streamer_symbol(symbol, instrument_type).await?;
-        info!(
-            "Subscribing to mktdata events for symbol: {}",
-            streamer_symbol
-        );
-        self.web_client
-            .subscribe_to_symbol(&streamer_symbol, vec!["Quote", "Greeks"])
-            .await?;
-        Self::stash_subscription(&mut self.events, symbol, underlying, &streamer_symbol).await;
         Ok(())
     }
 
@@ -451,44 +419,18 @@ impl MktData {
             }
         }
 
-        let streamer_symbol = match instrument_type {
-            InstrumentType::Equity => {
-                streamer_symbol::<tt_api::Response<tt_api::Equity>>(
-                    &self.web_client,
-                    &format!("instruments/equities/{}", symbol),
-                )
-                .await
-                .data
-                .streamer_symbol
-            }
-            InstrumentType::Future => {
-                streamer_symbol::<tt_api::Response<tt_api::Future>>(
-                    &self.web_client,
-                    &format!("instruments/futures/{}", symbol),
-                )
-                .await
-                .data
-                .streamer_symbol
-            }
-            InstrumentType::EquityOption => {
-                streamer_symbol::<tt_api::Response<tt_api::EquityOption>>(
-                    &self.web_client,
-                    &format!("instruments/equity-options/{}", symbol),
-                )
-                .await
-                .data
-                .streamer_symbol
-            }
-            InstrumentType::FutureOption => {
-                streamer_symbol::<tt_api::Response<tt_api::FutureOption>>(
-                    &self.web_client,
-                    &format!("instruments/future-options/{}", symbol),
-                )
-                .await
-                .data
-                .streamer_symbol
-            }
+        let endpoint = match instrument_type {
+            InstrumentType::Equity => format!("instruments/equities/{}", symbol),
+            InstrumentType::Future => format!("instruments/futures/{}", symbol),
+            InstrumentType::EquityOption => format!("instruments/equity-options/{}", symbol),
+            InstrumentType::FutureOption => format!("instruments/future-options/{}", symbol),
         };
+
+        let streamer_symbol =
+            streamer_symbol::<tt_api::Response<tt_api::Equity>>(&self.web_client, &endpoint)
+                .await
+                .data
+                .streamer_symbol;
         streamer_symbol.ok_or(anyhow!("Error getting streamer symbol: {}", symbol))
     }
 
@@ -521,7 +463,7 @@ impl MktData {
 
         match serde_json::from_str::<tt_api::FeedDataMessage>(&msg) {
             serde_json::Result::Ok(mut msg) => {
-                debug!("Last mktdata message received, msg: {:?}", msg);
+                info!("Last mktdata message received, msg: {:?}", msg);
 
                 let mut writer = events.lock().await;
                 writer.iter_mut().for_each(|snapshot| {
@@ -548,7 +490,10 @@ impl MktData {
                 });
             }
             serde_json::Result::Err(err) => {
-                info!("No Last mktdata message received, error: {:?}", err);
+                info!(
+                    "No Last mktdata message received: {:?}, error: {:?}",
+                    msg, err
+                );
             }
         };
         debug!("Writer updated {}", events.lock().await.len());
