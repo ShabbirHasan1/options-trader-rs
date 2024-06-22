@@ -8,8 +8,11 @@ use percent_encoding::CONTROLS;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
@@ -290,7 +293,7 @@ pub(crate) mod tt_api {
     pub struct Equity {
         pub halted_at: Option<String>,
         pub instrument_type: Option<String>,
-        pub tick_sizes: Option<TickSizes>,
+        pub tick_sizes: Option<Vec<TickSizes>>,
         pub is_illiquid: Option<bool>,
         pub active: Option<bool>,
         pub is_closing_only: Option<bool>,
@@ -325,6 +328,7 @@ struct Snapshot {
     symbol: String,
     underlying: String,
     streamer_symbol: String,
+    last_update: Instant,
     mktdata: Vec<tt_api::FeedEvent>,
 }
 
@@ -335,7 +339,7 @@ pub(crate) struct MktData {
 
 impl MktData {
     pub fn new(client: Arc<WebClient>, cancel_token: CancellationToken) -> Self {
-        let mut receiver = client.subscribe_to_events();
+        let mut receiver = client.subscribe_md_events();
         let events = Arc::new(Mutex::new(Vec::new()));
         let event_writer = Arc::clone(&events);
         tokio::spawn(async move {
@@ -349,9 +353,18 @@ impl MktData {
                                 cancel_token.cancel();
                             }
                             std::result::Result::Ok(val) => {
-                                Self::handle_msg(&event_writer, val, &cancel_token).await;
+                                Self::handle_msg(&event_writer, val, &cancel_token).await
                             }
                         }
+                    }
+                    _ = sleep(Duration::from_secs(1)) => {
+                        event_writer.lock().await.iter_mut().for_each(|snapshot| {
+                            let instant = &mut snapshot.last_update;
+                            if Instant::now().duration_since(*instant).gt(&Duration::from_secs(30)) {
+                                warn!("Not received any mktdata for symbol: {} for 30 seconds", snapshot.streamer_symbol);
+                                instant.clone_from(&Instant::now());
+                            }
+                        })
                     }
                     _ = cancel_token.cancelled() => {
                         break
@@ -364,6 +377,58 @@ impl MktData {
             web_client: client,
             events,
         }
+    }
+
+    async fn handle_msg(
+        events: &Arc<Mutex<Vec<Snapshot>>>,
+        msg: String,
+        _cancel_token: &CancellationToken,
+    ) {
+        fn get_symbol(data: &FeedEvent) -> &str {
+            match data {
+                FeedEvent::QuoteEvent(event) => event.event_symbol.as_ref(),
+                FeedEvent::GreeksEvent(event) => event.event_symbol.as_ref(),
+            }
+        }
+
+        match serde_json::from_str::<tt_api::FeedDataMessage>(&msg) {
+            serde_json::Result::Ok(mut msg) => {
+                debug!("Last mktdata message received, msg: {:?}", msg);
+
+                let mut writer = events.lock().await;
+                writer.iter_mut().for_each(|snapshot| {
+                    msg.data.iter_mut().for_each(|event| {
+                        let symbol = get_symbol(event);
+                        if symbol.ne(&snapshot.streamer_symbol) {
+                            return;
+                        }
+                        if snapshot.mktdata.is_empty() {
+                            snapshot.mktdata.push(event.clone());
+                        } else {
+                            snapshot.mktdata.iter_mut().for_each(|data| {
+                                match (&event, &data) {
+                                    (FeedEvent::QuoteEvent(_), FeedEvent::QuoteEvent(_)) => {
+                                        *data = event.clone()
+                                    }
+                                    (FeedEvent::GreeksEvent(_), FeedEvent::GreeksEvent(_)) => {
+                                        *data = event.clone()
+                                    }
+                                    _ => (),
+                                };
+                            })
+                        }
+                        snapshot.last_update = Instant::now();
+                    })
+                });
+            }
+            serde_json::Result::Err(err) => {
+                warn!(
+                    "No Last mktdata message received: {:?}, error: {:?}",
+                    msg, err
+                );
+            }
+        };
+        debug!("Writer updated {}", events.lock().await.len());
     }
 
     pub async fn subscribe_to_feed(
@@ -398,7 +463,10 @@ impl MktData {
             .map(|snapshot| snapshot.mktdata.clone())
             .unwrap_or_default();
 
-        debug!("Result {:?}", result);
+        if !result.is_empty() {
+            info!("Mktdata symbol: {} Result {:?}", symbol, result);
+        }
+
         result
     }
 
@@ -419,18 +487,45 @@ impl MktData {
             }
         }
 
-        let endpoint = match instrument_type {
-            InstrumentType::Equity => format!("instruments/equities/{}", symbol),
-            InstrumentType::Future => format!("instruments/futures/{}", symbol),
-            InstrumentType::EquityOption => format!("instruments/equity-options/{}", symbol),
-            InstrumentType::FutureOption => format!("instruments/future-options/{}", symbol),
-        };
-
-        let streamer_symbol =
-            streamer_symbol::<tt_api::Response<tt_api::Equity>>(&self.web_client, &endpoint)
+        let streamer_symbol = match instrument_type {
+            InstrumentType::Equity => {
+                streamer_symbol::<tt_api::Response<tt_api::Equity>>(
+                    &self.web_client,
+                    &format!("instruments/equities/{}", symbol),
+                )
                 .await
                 .data
-                .streamer_symbol;
+                .streamer_symbol
+            }
+            InstrumentType::Future => {
+                streamer_symbol::<tt_api::Response<tt_api::Future>>(
+                    &self.web_client,
+                    &format!("instruments/futures/{}", symbol),
+                )
+                .await
+                .data
+                .streamer_symbol
+            }
+            InstrumentType::EquityOption => {
+                streamer_symbol::<tt_api::Response<tt_api::EquityOption>>(
+                    &self.web_client,
+                    &format!("instruments/equity-options/{}", symbol),
+                )
+                .await
+                .data
+                .streamer_symbol
+            }
+            InstrumentType::FutureOption => {
+                streamer_symbol::<tt_api::Response<tt_api::FutureOption>>(
+                    &self.web_client,
+                    &format!("instruments/future-options/{}", symbol),
+                )
+                .await
+                .data
+                .streamer_symbol
+            }
+        };
+
         streamer_symbol.ok_or(anyhow!("Error getting streamer symbol: {}", symbol))
     }
 
@@ -444,58 +539,9 @@ impl MktData {
             symbol: symbol.to_string(),
             underlying: underlying.to_string(),
             streamer_symbol: streamer_symbol.to_string(),
+            last_update: Instant::now(),
             mktdata: Vec::new(),
         };
         events.lock().await.push(snapshot);
-    }
-
-    async fn handle_msg(
-        events: &Arc<Mutex<Vec<Snapshot>>>,
-        msg: String,
-        _cancel_token: &CancellationToken,
-    ) {
-        fn get_symbol(data: &FeedEvent) -> String {
-            match data {
-                FeedEvent::QuoteEvent(event) => event.event_symbol.clone(),
-                FeedEvent::GreeksEvent(event) => event.event_symbol.clone(),
-            }
-        }
-
-        match serde_json::from_str::<tt_api::FeedDataMessage>(&msg) {
-            serde_json::Result::Ok(mut msg) => {
-                info!("Last mktdata message received, msg: {:?}", msg);
-
-                let mut writer = events.lock().await;
-                writer.iter_mut().for_each(|snapshot| {
-                    msg.data.iter_mut().for_each(|event| {
-                        if get_symbol(event).ne(&snapshot.streamer_symbol) {
-                            return;
-                        }
-                        if snapshot.mktdata.is_empty() {
-                            snapshot.mktdata.push(event.clone());
-                        } else {
-                            snapshot.mktdata.iter_mut().for_each(|data| {
-                                match (&event, &data) {
-                                    (FeedEvent::QuoteEvent(_), FeedEvent::QuoteEvent(_)) => {
-                                        *data = event.clone()
-                                    }
-                                    (FeedEvent::GreeksEvent(_), FeedEvent::GreeksEvent(_)) => {
-                                        *data = event.clone()
-                                    }
-                                    _ => (),
-                                };
-                            })
-                        }
-                    })
-                });
-            }
-            serde_json::Result::Err(err) => {
-                info!(
-                    "No Last mktdata message received: {:?}, error: {:?}",
-                    msg, err
-                );
-            }
-        };
-        debug!("Writer updated {}", events.lock().await.len());
     }
 }

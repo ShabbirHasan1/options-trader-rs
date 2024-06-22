@@ -2,13 +2,10 @@ use anyhow::bail;
 use anyhow::Result;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
 use std::str::FromStr;
-use tracing::debug;
-use tracing::info;
 
 pub(crate) mod tt_api {
     use super::*;

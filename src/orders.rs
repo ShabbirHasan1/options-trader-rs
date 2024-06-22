@@ -1,4 +1,3 @@
-use anyhow::bail;
 use anyhow::Ok;
 use anyhow::Result;
 use rust_decimal::Decimal;
@@ -12,11 +11,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
-use tracing::instrument;
 use tracing::warn;
 
 use crate::mktdata::tt_api::FeedEvent;
-use crate::mktdata::tt_api::Future;
 use crate::mktdata::MktData;
 use crate::positions::Direction;
 use crate::positions::InstrumentType;
@@ -156,7 +153,7 @@ impl Orders {
         mkt_data: Arc<RwLock<MktData>>,
         cancel_token: CancellationToken,
     ) -> Self {
-        let mut receiver = web_client.subscribe_to_events();
+        let mut receiver = web_client.subscribe_acc_events();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -211,6 +208,7 @@ impl Orders {
         // if not in flight find the midprice of strategy
         let midprice = Self::get_midprice(
             meta_data.get_position().strategy_type,
+            meta_data.get_underlying(),
             &self.mkt_data,
             &order,
         )
@@ -222,7 +220,8 @@ impl Orders {
         );
 
         if midprice.eq(&Decimal::ZERO) {
-            bail!("Failed to calculate midprice")
+            warn!("Failed to calculate midprice");
+            return Ok(());
         }
 
         info!(
@@ -285,6 +284,7 @@ impl Orders {
 
     async fn get_midprice(
         strategy_type: StrategyType,
+        symbol: &str,
         mktdata: &Arc<RwLock<MktData>>,
         order: &tt_api::Order,
     ) -> Result<Decimal> {
@@ -313,8 +313,8 @@ impl Orders {
                 let option_bid = sell_bid - buy_ask;
                 let mid = (option_ask + option_bid) / Decimal::new(2, 0);
                 info!(
-                    "New calc mid: {} option bid: {} option ask: {}",
-                    mid, option_bid, option_ask
+                    "New calc symbol:{} mid: {} option bid: {} option ask: {}",
+                    symbol, mid, option_bid, option_ask
                 );
                 mid
             }
@@ -340,13 +340,10 @@ impl Orders {
             }
             _ => Decimal::default(),
         };
-        info!(
-            "For symbol: {}, calculated midprice: {}",
+        debug!(
+            "For leg symbol: {}, calculated midprice: {}",
             order.legs[0].symbol, calculated_midprice,
         );
-        if calculated_midprice.eq(&Decimal::ZERO) {
-            bail!("Failed to calculate midprice")
-        }
 
         Ok(calculated_midprice)
     }

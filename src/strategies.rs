@@ -152,7 +152,7 @@ impl CalendarSpread {
     }
 
     async fn should_exit(&self, mktdata: &MktData) -> bool {
-        let mut total_theta = 0.;
+        let total_theta = 0.;
         for complex_symbol in &self.position.legs {
             // if let Some(event) = mktdata.get_snapshot_events(complex_symbol.symbol()).await {
             //     // if let FeedEvent::GreeksEvent(greek) = event {

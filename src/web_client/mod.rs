@@ -1,8 +1,6 @@
 use anyhow::bail;
 use anyhow::Ok;
 use anyhow::Result;
-use chrono::DateTime;
-use chrono::Utc;
 use core::result::Result as CoreResult;
 use serde::Deserialize;
 use serde::Serialize;
@@ -126,28 +124,35 @@ struct User {
     external_id: String,
 }
 
+const CHANNEL_CAPACITY_TO_WS: usize = 100;
+const CHANNEL_CAPACITY_FROM_MD_WS: usize = 100;
+const CHANNEL_CAPACITY_FROM_ACC_WS: usize = 50;
+
 #[derive(Clone, Debug)]
 pub struct WebClient {
     session: String,
     account: String,
     http_client: HttpClient,
-    account_updates: Option<WebSocketClient<AccountSession>>,
-    mktdata: Option<WebSocketClient<MktdataSession>>,
-    to_app: Sender<String>,
+    account_ws: Option<WebSocketClient<AccountSession>>,
+    mktdata_ws: Option<WebSocketClient<MktdataSession>>,
+    mktdata_session: Sender<String>,
+    account_session: Sender<String>,
     cancel_token: CancellationToken,
 }
 
 impl WebClient {
     pub async fn new(base_url: &str, cancel_token: CancellationToken) -> Result<Self> {
-        let (to_app, _) = broadcast::channel::<String>(100);
+        let (md_channel, _) = broadcast::channel::<String>(CHANNEL_CAPACITY_FROM_MD_WS);
+        let (acc_channel, _) = broadcast::channel::<String>(CHANNEL_CAPACITY_FROM_ACC_WS);
 
         Ok(WebClient {
             session: String::default(),
             account: String::default(),
             http_client: HttpClient::new(&format!("https://{}", base_url)),
-            account_updates: None,
-            mktdata: None,
-            to_app,
+            account_ws: None,
+            mktdata_ws: None,
+            mktdata_session: md_channel,
+            account_session: acc_channel,
             cancel_token,
         })
     }
@@ -178,22 +183,22 @@ impl WebClient {
                 Err(err) => bail!("Failed to update refresh token, error: {}", err),
             };
         self.session = updates.data.session;
-        self.account = data.account.clone();
+        self.account.clone_from(&data.account);
 
         let api_quote_token = self
             .get_api_quote_token(&self.http_client, &self.session)
             .await?;
 
-        let (to_ws, _) = broadcast::channel::<String>(100);
-        self.mktdata = Some(
+        let (to_ws, _) = broadcast::channel::<String>(CHANNEL_CAPACITY_TO_WS);
+        self.mktdata_ws = Some(
             self.subscribe_to_mktdata(api_quote_token, to_ws, self.cancel_token.clone())
                 .await?,
         );
 
         info!("Session token {}", self.session.clone());
 
-        let (to_ws, _) = broadcast::channel::<String>(100);
-        self.account_updates = Some(
+        let (to_ws, _) = broadcast::channel::<String>(CHANNEL_CAPACITY_TO_WS);
+        self.account_ws = Some(
             self.subscribe_to_account_updates(
                 account_session_url,
                 &data.account.clone(),
@@ -241,7 +246,7 @@ impl WebClient {
     }
 
     pub async fn subscribe_to_symbol(&self, symbol: &str, event_type: &[&str]) -> Result<()> {
-        let client = self.mktdata.as_ref().unwrap();
+        let client = self.mktdata_ws.as_ref().unwrap();
         client
             .get_session()
             .write()
@@ -357,8 +362,12 @@ impl WebClient {
         Ok(response.data)
     }
 
-    pub fn subscribe_to_events(&self) -> Receiver<String> {
-        self.to_app.subscribe()
+    pub fn subscribe_md_events(&self) -> Receiver<String> {
+        self.mktdata_session.subscribe()
+    }
+
+    pub fn subscribe_acc_events(&self) -> Receiver<String> {
+        self.mktdata_session.subscribe()
     }
 
     async fn subscribe_to_account_updates(
@@ -369,8 +378,11 @@ impl WebClient {
         to_ws: Sender<String>,
         cancel_token: CancellationToken,
     ) -> Result<WebSocketClient<AccountSession>> {
-        let account_session =
-            AccountSession::new(&format!("wss://{}", url), to_ws, self.to_app.clone());
+        let account_session = AccountSession::new(
+            &format!("wss://{}", url),
+            to_ws,
+            self.account_session.clone(),
+        );
 
         let auth = account_session
             .write()
@@ -393,7 +405,7 @@ impl WebClient {
         cancel_token: CancellationToken,
     ) -> Result<WebSocketClient<MktdataSession>> {
         let mktdata_session =
-            MktdataSession::new(api_quote_token, to_ws.clone(), self.to_app.clone());
+            MktdataSession::new(api_quote_token, to_ws, self.mktdata_session.clone());
 
         let auth = mktdata_session.write().await.startup().await;
 
