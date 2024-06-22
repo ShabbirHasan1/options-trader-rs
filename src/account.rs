@@ -9,7 +9,6 @@ use tracing::warn;
 
 use crate::web_client::WebClient;
 
-
 use super::web_client::sessions::acc_api;
 
 mod tt_api {
@@ -132,13 +131,11 @@ mod tt_api {
     }
 }
 
-pub struct Account {
-    web_client: Arc<WebClient>,
-}
+pub struct Account {}
 
 impl Account {
     pub fn new(web_client: Arc<WebClient>, cancel_token: CancellationToken) -> Self {
-        let mut receiver = web_client.subscribe_to_events();
+        let mut receiver = web_client.subscribe_acc_events();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -160,7 +157,7 @@ impl Account {
                 }
             }
         });
-        Self { web_client }
+        Self {}
     }
 
     fn handle_msg(msg: String, _cancel_token: &CancellationToken) {

@@ -1,7 +1,6 @@
 use anyhow::Result;
 use broadcast::error::RecvError;
 use chrono::Utc;
-use core::result::Result as CoreResult;
 use futures_util::SinkExt;
 use futures_util::StreamExt as _;
 use native_tls::Protocol;

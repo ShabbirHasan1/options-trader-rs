@@ -508,7 +508,7 @@ impl WsSession for MktdataSession {
     where
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
-        info!("response {}", response);
+        debug!("response {}", response);
         if let serde_json::Result::Ok(payload) = serde_json::from_str::<md_api::FeedData>(&response)
         {
             match payload.msg.msg_type.as_str() {
