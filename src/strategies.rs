@@ -1,6 +1,7 @@
 use anyhow::bail;
 use anyhow::Result;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use std::fmt;
 use std::iter::Iterator;
@@ -18,13 +19,16 @@ use super::mktdata::MktData;
 use super::orders::Orders;
 use super::positions::Position;
 use super::web_client::WebClient;
-use crate::mktdata::tt_api::FeedEvent;
-use crate::positions::tt_api as pos_api;
+use crate::mktdata::Snapshot;
+use crate::positions::ComplexSymbol;
 use crate::positions::Direction;
 use crate::positions::InstrumentType;
 use crate::positions::OptionType;
 use crate::positions::PriceEffect;
 use crate::positions::StrategyType;
+use crate::tt_api::mktdata::Quote;
+use crate::tt_api::positions::AccountPositions;
+use crate::tt_api::positions::Leg;
 
 struct SpxSpread {
     web_client: Arc<RwLock<WebClient>>,
@@ -72,47 +76,56 @@ impl CreditSpread {
     }
 
     async fn should_exit(&self, mktdata: &MktData) -> bool {
-        fn get_back_leg_option_type(position: &Position) -> OptionType {
-            position.legs[1].option_type()
+        fn get_option_type(position: &Position) -> OptionType {
+            position.legs[0].option_type()
         }
 
-        let events = mktdata
-            .get_snapshot_events(self.position.legs[0].underlying())
+        fn get_strike_price(position: &Position) -> Decimal {
+            match get_option_type(position) {
+                OptionType::Call => position.legs[1].strike_price(),
+                OptionType::Put => position.legs[0].strike_price(),
+            }
+        }
+
+        fn get_midprice(snapshot: &Snapshot) -> Decimal {
+            if let Some(quote) = &snapshot.quote {
+                return quote.midprice();
+            }
+            dec!(0)
+        }
+
+        let mkt_event = mktdata
+            .get_snapshot_by_symbol::<Quote>(self.get_underlying())
             .await;
 
-        let mut mid_price = Decimal::default();
-        let strike_price = self.position.legs[0].strike_price();
-        let result = events
-            .iter()
-            .find(|event| matches!(event, FeedEvent::QuoteEvent(_)))
-            .and_then(|event| match event {
-                FeedEvent::QuoteEvent(quote) => {
-                    mid_price = (quote.ask_price + quote.bid_price) / Decimal::new(2, 0);
-                    let result = match get_back_leg_option_type(&self.position) {
-                        OptionType::Call => strike_price < mid_price,
-                        OptionType::Put => strike_price > mid_price,
-                    };
-                    Some(true)
-                    // Some(result)
-                }
-                _ => None,
-            })
-            .unwrap_or(false);
-        if result {
+        if let Some(snapshot) = mkt_event {
+            let mid_price = get_midprice(&snapshot);
+            if mid_price == dec!(0) {
+                return false;
+            }
+            let strike_price = get_strike_price(&self.position);
+            let result = match get_option_type(&self.position) {
+                OptionType::Call => strike_price < mid_price,
+                OptionType::Put => strike_price > mid_price,
+            };
+
             info!(
                 "Should exit position: {} mid price: {} has crossed strike price: {}",
                 self.get_underlying(),
                 mid_price,
                 strike_price
             );
+            result
+        } else {
+            false
         }
-        result
     }
 
     fn print(&self) {
         info!("{}", &self);
     }
 }
+
 impl fmt::Display for CreditSpread {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -207,65 +220,28 @@ impl IronCondor {
 
     //Matches the near leg strike price against underlying mid price
     async fn should_exit(&self, mktdata: &MktData) -> bool {
-        let events = mktdata.get_snapshot_events(self.get_underlying()).await;
-        let mid_price = events
-            .iter()
-            .find(|event| matches!(event, FeedEvent::QuoteEvent(_)))
-            .and_then(|event| match event {
-                FeedEvent::QuoteEvent(quote) => {
-                    Some((quote.ask_price + quote.bid_price) / Decimal::new(2, 0))
-                }
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        let call_strikes: Vec<Decimal> = self
-            .position
-            .legs
-            .iter()
-            .filter_map(|leg| {
-                if leg.option_type().eq(&OptionType::Call) {
-                    Some(leg.strike_price())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let put_strikes: Vec<Decimal> = self
-            .position
-            .legs
-            .iter()
-            .filter_map(|leg| {
-                if leg.option_type().eq(&OptionType::Put) {
-                    Some(leg.strike_price())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let call_strike = call_strikes.iter().min().unwrap_or(&Decimal::MAX);
-        let put_strike = put_strikes.iter().max().unwrap_or(&Decimal::ZERO);
-
-        if mid_price < *call_strike {
-            info!(
-                "Should exit position: {} mid price: {} has crossed strike price: {}",
-                self.get_underlying(),
-                mid_price,
-                *call_strike
-            );
-            return true;
+        fn get_strike_prices(position: &Position) -> (Decimal, Decimal) {
+            (
+                position.legs[1].strike_price(),
+                position.legs[2].strike_price(),
+            )
         }
-        if mid_price > *put_strike {
-            info!(
-                "Should exit position: {} mid price: {} has crossed strike price: {}",
-                self.get_underlying(),
-                mid_price,
-                *put_strike
-            );
-            return true;
+
+        let mkt_event = mktdata
+            .get_snapshot_by_symbol::<Quote>(self.get_underlying())
+            .await;
+
+        if let Some(snapshot) = mkt_event {
+            let mid_price = snapshot.quote.unwrap().midprice();
+            if mid_price == Decimal::default() {
+                return false;
+            }
+            let (call_strike_price, put_strike_price) = get_strike_prices(&self.position);
+
+            call_strike_price < mid_price || put_strike_price > mid_price
+        } else {
+            false
         }
-        false
     }
 
     fn print(&self) {
@@ -373,57 +349,75 @@ impl Strategies {
         mktdata: &Arc<RwLock<MktData>>,
         _cancel_token: &CancellationToken,
     ) {
-        async fn subscribe<Strat>(strategy: &Strat, mktdata: &Arc<RwLock<MktData>>)
-        where
-            Strat: StrategyMeta + Sync + Send,
-        {
-            fn get_underlying_instrument_type(instrument_type: InstrumentType) -> InstrumentType {
-                match instrument_type {
-                    InstrumentType::EquityOption => InstrumentType::Equity,
-                    InstrumentType::FutureOption => InstrumentType::Future,
-                    _ => panic!("Unsupported Type"),
-                }
+        fn get_underlying_instrument_type(instrument_type: InstrumentType) -> InstrumentType {
+            match instrument_type {
+                InstrumentType::EquityOption => InstrumentType::Equity,
+                InstrumentType::FutureOption => InstrumentType::Future,
+                _ => panic!("Unsupported Type"),
             }
+        }
 
-            if let Err(err) = mktdata
-                .write()
-                .await
+        async fn subscribe_to_symbol(
+            symbol: &str,
+            underlying: &str,
+            event_type: &str,
+            option_type: InstrumentType,
+            strike_price: Option<Decimal>,
+            mktdata: Arc<RwLock<MktData>>,
+        ) {
+            let mut write_lock = mktdata.write().await;
+            if let Err(err) = write_lock
                 .subscribe_to_feed(
-                    strategy.get_underlying(),
-                    vec!["Quote"].as_slice(),
-                    get_underlying_instrument_type(strategy.get_instrument_type()),
+                    symbol,
+                    underlying,
+                    vec![event_type].as_slice(),
+                    option_type,
+                    strike_price,
                 )
                 .await
             {
                 error!(
-                    "Failed to subscribe to mktdata for symbol: {}, error: {}",
-                    strategy.get_underlying(),
-                    err
+                    "Failed to subscribe to symbol: {} feed, error: {}",
+                    symbol, err
                 );
             }
-
-            // for symbol in strategy.get_symbols() {
-            //     if let Err(err) = mktdata
-            //         .write()
-            //         .await
-            //         .subscribe_to_feed(
-            //             symbol,
-            //             strategy.get_underlying(),
-            // vec!["Quote", "Greeks"].as_slice(),
-            //             strategy.get_instrument_type(),
-            //         )
-            //         .await
-            //     {
-            //         error!(
-            //             "Failed to subscribe to mktdata for symbol: {}, error: {}",
-            //             symbol, err
-            //         );
-            //     }
-            // }
         }
+
+        async fn subscribe_to_option_and_underlying<Strat>(
+            strategy: &Strat,
+            mktdata: &Arc<RwLock<MktData>>,
+        ) where
+            Strat: StrategyMeta + Sync + Send,
+        {
+            let underlying = strategy.get_underlying();
+            for leg in strategy.get_position().legs.iter() {
+                subscribe_to_symbol(
+                    leg.symbol(),
+                    underlying,
+                    "Quote",
+                    leg.instrument_type(),
+                    Some(leg.strike_price()),
+                    mktdata.clone(),
+                )
+                .await;
+            }
+
+            subscribe_to_symbol(
+                underlying,
+                underlying,
+                "Quote",
+                get_underlying_instrument_type(strategy.get_instrument_type()),
+                None,
+                mktdata.clone(),
+            )
+            .await;
+        }
+
         for strategy in strategies {
             match &strategy {
-                Strategy::Credit(strat) => subscribe(strat, mktdata).await,
+                Strategy::Credit(strategy) => {
+                    subscribe_to_option_and_underlying(strategy, mktdata).await
+                }
                 // Strategy::Calendar(strat) => subscribe(strat, mktdata).await,
                 // Strategy::Condor(strat) => subscribe(strat, mktdata).await,
                 _ => (),
@@ -479,7 +473,7 @@ impl Strategies {
 
     async fn get_strategies(web_client: &WebClient) -> Result<Vec<Strategy>> {
         let positions = match web_client
-            .get::<pos_api::AccountPositions>(
+            .get::<AccountPositions>(
                 format!("accounts/{}/positions", web_client.get_account()).as_str(),
             )
             .await
@@ -495,8 +489,8 @@ impl Strategies {
         Ok(Self::convert_api_data_into_strategies(positions.data.legs).await)
     }
 
-    async fn convert_api_data_into_strategies(legs: Vec<pos_api::Leg>) -> Vec<Strategy> {
-        let mut sorted_legs: HashMap<String, Vec<pos_api::Leg>> = HashMap::new();
+    async fn convert_api_data_into_strategies(legs: Vec<Leg>) -> Vec<Strategy> {
+        let mut sorted_legs: HashMap<String, Vec<Leg>> = HashMap::new();
 
         legs.iter().for_each(|leg| {
             let underlying = leg.underlying_symbol.clone().unwrap(); // Assuming underlying_symbol is a string

@@ -1,8 +1,6 @@
 use anyhow::Ok;
 use anyhow::Result;
 use rust_decimal::Decimal;
-use serde::Deserialize;
-use serde::Serialize;
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
@@ -13,113 +11,18 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-use crate::mktdata::tt_api::FeedEvent;
 use crate::mktdata::MktData;
+use crate::mktdata::Snapshot;
 use crate::positions::Direction;
 use crate::positions::InstrumentType;
 use crate::positions::PriceEffect;
 use crate::positions::StrategyType;
 use crate::strategies::StrategyMeta;
+use crate::tt_api::mktdata::Quote;
+use crate::tt_api::orders::*;
 use crate::web_client::WebClient;
 
 use super::web_client::sessions::acc_api;
-
-mod tt_api {
-    use super::*;
-
-    #[derive(Debug, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    pub struct LegData {
-        pub instrument_type: String,
-        pub symbol: String,
-        pub quantity: i32,
-        pub remaining_quantity: i32,
-        pub action: String,
-        pub fills: Vec<String>,
-    }
-
-    #[derive(Debug, Default, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    pub struct OrderData {
-        pub id: i32,
-        pub account_number: String,
-        pub time_in_force: String,
-        pub order_type: String,
-        pub size: i32,
-        pub underlying_symbol: String,
-        pub underlying_instrument_type: String,
-        pub status: String,
-        pub cancellable: bool,
-        pub editable: bool,
-        pub edited: bool,
-        pub legs: Vec<LegData>,
-    }
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    pub struct Order {
-        pub time_in_force: String,
-        pub order_type: String,
-        // pub stop_trigger: Option<u32>,
-        #[serde(with = "rust_decimal::serde::float")]
-        pub price: Decimal,
-        pub price_effect: String,
-        // pub value: Option<u32>,
-        // pub value_effect: Option<String>,
-        // pub gtc_date: Option<String>,
-        // pub source: Option<String>,
-        // pub partition_key: Option<String>,
-        // pub preflight_id: Option<String>,
-        // pub automated_source: Option<bool>,
-        pub legs: Vec<Leg>,
-        // pub rules: Option<Rules>,
-        // pub advanced_instructions: Option<AdvancedInstructions>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    pub struct Leg {
-        pub instrument_type: String,
-        pub symbol: String,
-        pub quantity: i32,
-        pub action: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    pub struct Rules {
-        pub route_after: String,
-        pub cancel_at: String,
-        pub conditions: Vec<Condition>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    pub struct Condition {
-        pub action: String,
-        pub symbol: String,
-        pub instrument_type: String,
-        pub indicator: String,
-        pub comparator: String,
-        pub threshold: u32,
-        pub price_components: Vec<PriceComponent>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    pub struct PriceComponent {
-        pub symbol: String,
-        pub instrument_type: String,
-        pub quantity: u32,
-        pub quantity_direction: String,
-    }
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    pub struct AdvancedInstructions {
-        pub strict_position_effect_validation: bool,
-    }
-}
 
 #[derive(Debug)]
 enum OrderType {
@@ -144,7 +47,7 @@ impl fmt::Display for OrderType {
 pub struct Orders {
     web_client: Arc<WebClient>,
     mkt_data: Arc<RwLock<MktData>>,
-    orders: Vec<tt_api::Order>,
+    orders: Vec<Order>,
 }
 
 impl Orders {
@@ -240,10 +143,7 @@ impl Orders {
         Ok(())
     }
 
-    fn build_order_from_meta<Meta>(
-        meta_data: &Meta,
-        price_effect: PriceEffect,
-    ) -> Result<tt_api::Order>
+    fn build_order_from_meta<Meta>(meta_data: &Meta, price_effect: PriceEffect) -> Result<Order>
     where
         Meta: StrategyMeta,
     {
@@ -261,7 +161,7 @@ impl Orders {
             }
         }
 
-        let order = tt_api::Order {
+        let order = Order {
             time_in_force: String::from("DAY"),
             order_type: OrderType::Limit.to_string(),
             price_effect: PriceEffect::Debit.to_string(),
@@ -269,7 +169,7 @@ impl Orders {
                 .get_position()
                 .legs
                 .iter()
-                .map(|leg| tt_api::Leg {
+                .map(|leg| Leg {
                     instrument_type: leg.instrument_type().to_string(),
                     symbol: get_symbol(leg.symbol(), leg.instrument_type()),
                     quantity: leg.quantity(),
@@ -286,55 +186,62 @@ impl Orders {
         strategy_type: StrategyType,
         symbol: &str,
         mktdata: &Arc<RwLock<MktData>>,
-        order: &tt_api::Order,
+        order: &Order,
     ) -> Result<Decimal> {
-        fn get_bid_ask(events: Vec<FeedEvent>) -> (Decimal, Decimal) {
-            events
-                .iter()
-                .find(|event| matches!(event, FeedEvent::QuoteEvent(_)))
-                .and_then(|event| match event {
-                    FeedEvent::QuoteEvent(quote) => {
-                        Some((quote.bid_price.abs(), quote.ask_price.abs()))
-                    }
-                    _ => None,
-                })
-                .unwrap_or((Decimal::default(), Decimal::default()))
+        fn get_mid_price(event: Option<Snapshot>) -> Decimal {
+            if let Some(quote) = &event.as_ref().unwrap().quote {
+                return quote.midprice();
+            }
+            Decimal::default()
         }
 
         let reader = mktdata.read().await;
         let calculated_midprice = match strategy_type {
             StrategyType::CreditSpread | StrategyType::CalendarSpread => {
-                let (sell_bid, sell_ask) =
-                    get_bid_ask(reader.get_snapshot_events(&order.legs[0].symbol).await);
-                let (buy_bid, buy_ask) =
-                    get_bid_ask(reader.get_snapshot_events(&order.legs[1].symbol).await);
-
-                let option_ask = sell_ask - buy_bid;
-                let option_bid = sell_bid - buy_ask;
-                let mid = (option_ask + option_bid) / Decimal::new(2, 0);
+                let sell_mid = get_mid_price(
+                    reader
+                        .get_snapshot_by_symbol::<Quote>(&order.legs[0].symbol)
+                        .await,
+                );
+                let buy_mid = get_mid_price(
+                    reader
+                        .get_snapshot_by_symbol::<Quote>(&order.legs[1].symbol)
+                        .await,
+                );
+                let mid = sell_mid - buy_mid;
                 info!(
-                    "New calc symbol:{} mid: {} option bid: {} option ask: {}",
-                    symbol, mid, option_bid, option_ask
+                    "New calc symbol:{} mid: {} sell mid: {} buy mid: {}",
+                    symbol, mid, sell_mid, buy_mid
                 );
                 mid
             }
             StrategyType::IronCondor => {
-                let (call_sell_bid, call_sell_ask) =
-                    get_bid_ask(reader.get_snapshot_events(&order.legs[0].symbol).await);
-                let (call_buy_bid, call_buy_ask) =
-                    get_bid_ask(reader.get_snapshot_events(&order.legs[2].symbol).await);
-
-                let (put_sell_bid, put_sell_ask) =
-                    get_bid_ask(reader.get_snapshot_events(&order.legs[1].symbol).await);
-                let (put_buy_bid, put_buy_ask) =
-                    get_bid_ask(reader.get_snapshot_events(&order.legs[3].symbol).await);
-
-                let option_ask = (call_sell_ask - call_buy_bid) + (put_sell_ask - put_buy_bid);
-                let option_bid = (call_sell_bid - call_buy_ask) + (put_sell_bid - put_buy_ask);
-                let mid = (option_ask + option_bid) / Decimal::new(2, 0);
+                let call_sell_mid = get_mid_price(
+                    reader
+                        .get_snapshot_by_symbol::<Quote>(&order.legs[1].symbol)
+                        .await,
+                );
+                let call_buy_mid = get_mid_price(
+                    reader
+                        .get_snapshot_by_symbol::<Quote>(&order.legs[0].symbol)
+                        .await,
+                );
+                let put_sell_mid = get_mid_price(
+                    reader
+                        .get_snapshot_by_symbol::<Quote>(&order.legs[2].symbol)
+                        .await,
+                );
+                let put_buy_mid = get_mid_price(
+                    reader
+                        .get_snapshot_by_symbol::<Quote>(&order.legs[3].symbol)
+                        .await,
+                );
+                let mid = (call_sell_mid - call_buy_mid) + (put_sell_mid - put_buy_mid);
                 info!(
-                    "New calc mid: {} option bid: {} option ask: {}",
-                    mid, option_bid, option_ask
+                    "New calc mid: {} call spread: {} put spread: {}",
+                    mid,
+                    call_sell_mid - call_buy_mid,
+                    put_sell_mid - put_buy_mid
                 );
                 mid
             }
@@ -350,12 +257,12 @@ impl Orders {
 
     async fn place_order(
         account_number: &str,
-        order: &tt_api::Order,
+        order: &Order,
         web_client: &Arc<WebClient>,
-    ) -> Result<tt_api::OrderData> {
+    ) -> Result<OrderData> {
         info!("Placing order: {:?}", order);
         web_client
-            .post::<tt_api::Order, tt_api::OrderData>(
+            .post::<Order, OrderData>(
                 &format!("accounts/{}/orders/dry-run", account_number),
                 order.clone(),
             )
@@ -364,11 +271,11 @@ impl Orders {
 
     async fn replace_order(
         account_number: &str,
-        order: tt_api::Order,
+        order: Order,
         web_client: &Arc<WebClient>,
-    ) -> Result<tt_api::OrderData> {
+    ) -> Result<OrderData> {
         // web_client
-        //     .put::<tt_api::Order, tt_api::OrderData>(
+        //     .put::<Order, OrderData>(
         //         &format!(
         //             "accounts/{}/orders/{}/dry-run",
         //             account_number,
@@ -377,7 +284,7 @@ impl Orders {
         //         order,
         //     )
         //     .await
-        Ok(tt_api::OrderData::default())
+        Ok(OrderData::default())
     }
 
     fn handle_msg(msg: String, _cancel_token: &CancellationToken) {

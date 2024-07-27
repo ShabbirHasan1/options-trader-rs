@@ -2,83 +2,10 @@ use anyhow::bail;
 use anyhow::Result;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
-use serde::Deserialize;
-use serde::Serialize;
 use std::fmt;
 use std::str::FromStr;
 
-pub(crate) mod tt_api {
-    use super::*;
-
-    #[derive(Debug, Deserialize, Serialize)]
-    pub struct AccountPositions {
-        pub data: Positions,
-        pub context: String,
-    }
-
-    #[derive(Clone, Debug, Deserialize, Serialize)]
-    pub struct Positions {
-        #[serde(rename = "items")]
-        pub legs: Vec<Leg>,
-    }
-
-    #[derive(Clone, Debug, Deserialize, Serialize)]
-    pub struct Leg {
-        #[serde(rename = "instrument-type")]
-        pub instrument_type: Option<String>,
-        pub multiplier: Option<i32>,
-        #[serde(rename = "realized-today")]
-        pub realized_today: Option<String>,
-        #[serde(rename = "is-frozen")]
-        pub is_frozen: bool,
-        #[serde(rename = "updated-at")]
-        pub updated_at: Option<String>,
-        #[serde(rename = "average-daily-market-close-price")]
-        pub average_daily_market_close_price: Option<String>,
-        #[serde(rename = "deliverable-type")]
-        pub deliverable_type: Option<String>,
-        #[serde(rename = "underlying-symbol")]
-        pub underlying_symbol: Option<String>,
-        #[serde(rename = "mark-price")]
-        pub mark_price: Option<String>,
-        #[serde(rename = "account-number")]
-        pub account_number: Option<String>,
-        #[serde(rename = "fixing-price")]
-        pub fixing_price: Option<String>,
-        pub quantity: i32,
-        #[serde(rename = "realized-day-gain-date")]
-        pub realized_day_gain_date: Option<String>,
-        #[serde(rename = "expires-at")]
-        pub expires_at: Option<String>,
-        pub mark: Option<Option<String>>,
-        #[serde(rename = "realized-day-gain")]
-        pub realized_day_gain: Option<String>,
-        #[serde(rename = "realized-day-gain-effect")]
-        pub realized_day_gain_effect: Option<String>,
-        #[serde(rename = "cost-effect")]
-        pub cost_effect: Option<String>,
-        #[serde(rename = "close-price")]
-        pub close_price: Option<String>,
-        #[serde(rename = "average-yearly-market-close-price")]
-        pub average_yearly_market_close_price: Option<String>,
-        #[serde(rename = "average-open-price")]
-        pub average_open_price: Option<String>,
-        #[serde(rename = "is-suppressed")]
-        pub is_suppressed: bool,
-        pub created_at: Option<String>,
-        pub symbol: String,
-        #[serde(rename = "realized-today-date")]
-        pub realized_today_date: Option<String>,
-        #[serde(rename = "order-id")]
-        pub order_id: Option<String>,
-        #[serde(rename = "realized-today-effect")]
-        pub realized_today_effect: Option<String>,
-        #[serde(rename = "quantity-direction")]
-        pub quantity_direction: Option<String>,
-        #[serde(rename = "restricted-quantity")]
-        pub restricted_quantity: Option<i32>,
-    }
-}
+use crate::tt_api::positions::*;
 
 #[derive(Debug, Clone, Copy)]
 pub enum StrategyType {
@@ -155,7 +82,7 @@ impl fmt::Display for dyn ComplexSymbol {
 }
 
 #[derive(Debug)]
-struct FutureOptionSymbol {
+struct FutureOption {
     symbol: String,
     underlying: String,
     expiration_date: NaiveDate,
@@ -165,7 +92,7 @@ struct FutureOptionSymbol {
     quantity: i32,
 }
 
-impl FutureOptionSymbol {
+impl FutureOption {
     pub fn parse(
         symbol: &str,
         underlying: &str,
@@ -198,7 +125,7 @@ impl FutureOptionSymbol {
         //TODO fix the strike price
         let strike_price = Decimal::from_str(&parts[2][7..])?;
 
-        Ok(Box::new(FutureOptionSymbol {
+        Ok(Box::new(FutureOption {
             symbol: symbol.to_string(),
             underlying: underlying.to_string(),
             expiration_date,
@@ -210,7 +137,7 @@ impl FutureOptionSymbol {
     }
 }
 
-impl ComplexSymbol for FutureOptionSymbol {
+impl ComplexSymbol for FutureOption {
     fn print(&self) -> String {
         format!(
             "symbol: {}, underlying: {}, expiration: {}, type:{}, strike: {}",
@@ -252,7 +179,7 @@ impl ComplexSymbol for FutureOptionSymbol {
 }
 
 #[derive(Debug)]
-struct EquityOptionSymbol {
+struct EquityOption {
     symbol: String,
     underlying: String,
     expiration_date: NaiveDate,
@@ -262,7 +189,7 @@ struct EquityOptionSymbol {
     quantity: i32,
 }
 
-impl EquityOptionSymbol {
+impl EquityOption {
     pub fn parse(
         symbol: &str,
         underlying: &str,
@@ -286,7 +213,7 @@ impl EquityOptionSymbol {
         let strike_price = Decimal::from_str(symbol[13..].trim_start_matches('0'))?;
         let strike_price = strike_price / Decimal::new(1000, 0);
 
-        Ok(Box::new(EquityOptionSymbol {
+        Ok(Box::new(EquityOption {
             symbol: symbol.to_string(),
             underlying: underlying.to_string(),
             expiration_date,
@@ -298,7 +225,7 @@ impl EquityOptionSymbol {
     }
 }
 
-impl ComplexSymbol for EquityOptionSymbol {
+impl ComplexSymbol for EquityOption {
     fn print(&self) -> String {
         format!(
             "symbol: {}, underlying: {}, expiration: {}, type:{}, strike: {}",
@@ -401,7 +328,7 @@ impl fmt::Display for Position {
 }
 
 impl Position {
-    pub fn new(legs: Vec<tt_api::Leg>) -> Position {
+    pub fn new(legs: Vec<Leg>) -> Position {
         let mut symbols = Self::parse_complex_symbols(&legs);
         let strategy_type = Self::determine_strategy(&symbols, &legs);
         symbols.sort_by(|a, b| {
@@ -415,21 +342,21 @@ impl Position {
         }
     }
 
-    fn parse_complex_symbols(legs: &[tt_api::Leg]) -> Vec<Box<dyn ComplexSymbol>> {
+    fn parse_complex_symbols(legs: &[Leg]) -> Vec<Box<dyn ComplexSymbol>> {
         let symbols: Vec<Box<dyn ComplexSymbol>> = legs
             .iter()
             .filter_map(|leg| {
                 match InstrumentType::get_symbol_type(
                     leg.instrument_type.as_ref().unwrap().as_str(),
                 ) {
-                    InstrumentType::EquityOption => EquityOptionSymbol::parse(
+                    InstrumentType::EquityOption => EquityOption::parse(
                         &leg.symbol,
                         leg.underlying_symbol.as_ref().unwrap().as_str(),
                         leg.quantity_direction.as_ref().unwrap(),
                         leg.quantity,
                     )
                     .ok(),
-                    InstrumentType::FutureOption => FutureOptionSymbol::parse(
+                    InstrumentType::FutureOption => FutureOption::parse(
                         &leg.symbol,
                         leg.underlying_symbol.as_ref().unwrap().as_str(),
                         leg.quantity_direction.as_ref().unwrap(),
@@ -444,10 +371,7 @@ impl Position {
         symbols
     }
 
-    fn determine_strategy(
-        symbols: &[Box<dyn ComplexSymbol>],
-        legs: &[tt_api::Leg],
-    ) -> StrategyType {
+    fn determine_strategy(symbols: &[Box<dyn ComplexSymbol>], legs: &[Leg]) -> StrategyType {
         match legs.len() {
             1 => Self::single_leg_strategies(symbols),
             2 => Self::double_leg_strategies(symbols),
