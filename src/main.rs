@@ -14,6 +14,7 @@ mod orders;
 mod positions;
 mod settings;
 mod strategies;
+mod tt_api;
 mod web_client;
 
 use db_client::DBClient;

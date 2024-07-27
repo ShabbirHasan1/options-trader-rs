@@ -16,7 +16,6 @@ use tracing::info;
 
 pub(crate) mod http_client;
 pub(crate) mod sessions;
-mod tt_api;
 mod websocket;
 
 use crate::db_client::SqlQueryBuilder;
