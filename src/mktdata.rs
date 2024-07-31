@@ -20,7 +20,7 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-use crate::positions::InstrumentType;
+use crate::positions::OptionType;
 use crate::tt_api::mktdata::*;
 
 use super::web_client::WebClient;
@@ -153,7 +153,7 @@ impl MktData {
         symbol: &str,
         underlying: &str,
         event_type: &[&str],
-        instrument_type: InstrumentType,
+        instrument_type: OptionType,
         strike_price: Option<Decimal>,
     ) -> anyhow::Result<()> {
         let streamer_symbol = self.get_streamer_symbol(symbol, instrument_type).await?;
@@ -227,7 +227,7 @@ impl MktData {
     async fn get_streamer_symbol(
         &self,
         symbol: &str,
-        instrument_type: InstrumentType,
+        instrument_type: OptionType,
     ) -> Result<String> {
         let symbol = utf8_percent_encode(symbol, UTF8_ECODING).to_string();
 
@@ -242,7 +242,7 @@ impl MktData {
         }
 
         let streamer_symbol = match instrument_type {
-            InstrumentType::Equity => {
+            OptionType::Equity => {
                 streamer_symbol::<Response<Equity>>(
                     &self.web_client,
                     &format!("instruments/equities/{}", symbol),
@@ -251,7 +251,7 @@ impl MktData {
                 .data
                 .streamer_symbol
             }
-            InstrumentType::Future => {
+            OptionType::Future => {
                 streamer_symbol::<Response<Future>>(
                     &self.web_client,
                     &format!("instruments/futures/{}", symbol),
@@ -260,7 +260,7 @@ impl MktData {
                 .data
                 .streamer_symbol
             }
-            InstrumentType::EquityOption => {
+            OptionType::EquityOption => {
                 streamer_symbol::<Response<EquityOption>>(
                     &self.web_client,
                     &format!("instruments/equity-options/{}", symbol),
@@ -269,7 +269,7 @@ impl MktData {
                 .data
                 .streamer_symbol
             }
-            InstrumentType::FutureOption => {
+            OptionType::FutureOption => {
                 streamer_symbol::<Response<FutureOption>>(
                     &self.web_client,
                     &format!("instruments/future-options/{}", symbol),

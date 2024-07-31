@@ -14,7 +14,7 @@ use tracing::warn;
 use crate::mktdata::MktData;
 use crate::mktdata::Snapshot;
 use crate::positions::Direction;
-use crate::positions::InstrumentType;
+use crate::positions::OptionType;
 use crate::positions::PriceEffect;
 use crate::positions::StrategyType;
 use crate::strategies::StrategyMeta;
@@ -154,9 +154,9 @@ impl Orders {
             }
         }
 
-        fn get_symbol(symbol: &str, instrument_type: InstrumentType) -> String {
+        fn get_symbol(symbol: &str, instrument_type: OptionType) -> String {
             match instrument_type {
-                InstrumentType::FutureOption => symbol.to_string(),
+                OptionType::FutureOption => symbol.to_string(),
                 _ => symbol.to_string(),
             }
         }
@@ -170,10 +170,10 @@ impl Orders {
                 .legs
                 .iter()
                 .map(|leg| Leg {
-                    instrument_type: leg.instrument_type().to_string(),
-                    symbol: get_symbol(leg.symbol(), leg.instrument_type()),
-                    quantity: leg.quantity(),
-                    action: get_action(leg.direction()),
+                    instrument_type: leg.option_type.to_string(),
+                    symbol: get_symbol(&leg.symbol, leg.option_type),
+                    quantity: leg.quantity,
+                    action: get_action(leg.direction),
                 })
                 .collect(),
             ..Default::default()

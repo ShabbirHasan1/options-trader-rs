@@ -20,9 +20,9 @@ use super::orders::Orders;
 use super::positions::Position;
 use super::web_client::WebClient;
 use crate::mktdata::Snapshot;
-use crate::positions::ComplexSymbol;
 use crate::positions::Direction;
-use crate::positions::InstrumentType;
+use crate::positions::OptionLeg;
+use crate::positions::OptionSide;
 use crate::positions::OptionType;
 use crate::positions::PriceEffect;
 use crate::positions::StrategyType;
@@ -62,7 +62,7 @@ impl SpxSpread {
 pub(crate) trait StrategyMeta: Sync + Send {
     fn get_underlying(&self) -> &str;
     fn get_symbols(&self) -> Vec<&str>;
-    fn get_instrument_type(&self) -> InstrumentType;
+    fn get_instrument_type(&self) -> OptionType;
     fn get_position(&self) -> &Position;
 }
 
@@ -76,14 +76,14 @@ impl CreditSpread {
     }
 
     async fn should_exit(&self, mktdata: &MktData) -> bool {
-        fn get_option_type(position: &Position) -> OptionType {
-            position.legs[0].option_type()
+        fn get_option_type(position: &Position) -> OptionSide {
+            position.legs[0].side
         }
 
         fn get_strike_price(position: &Position) -> Decimal {
             match get_option_type(position) {
-                OptionType::Call => position.legs[1].strike_price(),
-                OptionType::Put => position.legs[0].strike_price(),
+                OptionSide::Call => position.legs[1].strike_price,
+                OptionSide::Put => position.legs[0].strike_price,
             }
         }
 
@@ -105,8 +105,8 @@ impl CreditSpread {
             }
             let strike_price = get_strike_price(&self.position);
             let result = match get_option_type(&self.position) {
-                OptionType::Call => strike_price < mid_price,
-                OptionType::Put => strike_price > mid_price,
+                OptionSide::Call => strike_price < mid_price,
+                OptionSide::Put => strike_price > mid_price,
             };
 
             info!(
@@ -131,7 +131,7 @@ impl fmt::Display for CreditSpread {
         write!(
             f,
             "CreditSpread {}: [{}\n]",
-            &self.position.legs.first().unwrap().symbol(),
+            &self.position.legs.first().unwrap().symbol,
             &self.position
         )
     }
@@ -139,15 +139,19 @@ impl fmt::Display for CreditSpread {
 
 impl StrategyMeta for CreditSpread {
     fn get_underlying(&self) -> &str {
-        self.position.legs.first().unwrap().underlying()
+        &self.position.legs.first().unwrap().underlying
     }
 
     fn get_symbols(&self) -> Vec<&str> {
-        self.position.legs.iter().map(|leg| leg.symbol()).collect()
+        self.position
+            .legs
+            .iter()
+            .map(|leg| leg.symbol.as_str())
+            .collect()
     }
 
-    fn get_instrument_type(&self) -> InstrumentType {
-        self.position.legs.first().unwrap().instrument_type()
+    fn get_instrument_type(&self) -> OptionType {
+        self.position.legs.first().unwrap().option_type
     }
 
     fn get_position(&self) -> &Position {
@@ -185,7 +189,7 @@ impl fmt::Display for CalendarSpread {
         write!(
             f,
             "CalendarSpread {}: [{}\n]",
-            &self.position.legs.first().unwrap().symbol(),
+            &self.position.legs.first().unwrap().symbol,
             &self.position
         )
     }
@@ -193,15 +197,19 @@ impl fmt::Display for CalendarSpread {
 
 impl StrategyMeta for CalendarSpread {
     fn get_underlying(&self) -> &str {
-        self.position.legs.first().unwrap().underlying()
+        &self.position.legs.first().unwrap().underlying
     }
 
     fn get_symbols(&self) -> Vec<&str> {
-        self.position.legs.iter().map(|leg| leg.symbol()).collect()
+        self.position
+            .legs
+            .iter()
+            .map(|leg| leg.symbol.as_str())
+            .collect()
     }
 
-    fn get_instrument_type(&self) -> InstrumentType {
-        self.position.legs.first().unwrap().instrument_type()
+    fn get_instrument_type(&self) -> OptionType {
+        self.position.legs.first().unwrap().option_type
     }
 
     fn get_position(&self) -> &Position {
@@ -221,10 +229,7 @@ impl IronCondor {
     //Matches the near leg strike price against underlying mid price
     async fn should_exit(&self, mktdata: &MktData) -> bool {
         fn get_strike_prices(position: &Position) -> (Decimal, Decimal) {
-            (
-                position.legs[1].strike_price(),
-                position.legs[2].strike_price(),
-            )
+            (position.legs[1].strike_price, position.legs[2].strike_price)
         }
 
         let mkt_event = mktdata
@@ -254,7 +259,7 @@ impl fmt::Display for IronCondor {
         write!(
             f,
             "IronCondor {}: [{}\n]",
-            &self.position.legs.first().unwrap().underlying(),
+            &self.position.legs.first().unwrap().underlying,
             &self.position
         )
     }
@@ -262,15 +267,19 @@ impl fmt::Display for IronCondor {
 
 impl StrategyMeta for IronCondor {
     fn get_underlying(&self) -> &str {
-        self.position.legs.first().unwrap().underlying()
+        &self.position.legs.first().unwrap().underlying
     }
 
     fn get_symbols(&self) -> Vec<&str> {
-        self.position.legs.iter().map(|leg| leg.symbol()).collect()
+        self.position
+            .legs
+            .iter()
+            .map(|leg| leg.symbol.as_str())
+            .collect()
     }
 
-    fn get_instrument_type(&self) -> InstrumentType {
-        self.position.legs.first().unwrap().instrument_type()
+    fn get_instrument_type(&self) -> OptionType {
+        self.position.legs.first().unwrap().option_type
     }
 
     fn get_position(&self) -> &Position {
@@ -349,10 +358,10 @@ impl Strategies {
         mktdata: &Arc<RwLock<MktData>>,
         _cancel_token: &CancellationToken,
     ) {
-        fn get_underlying_instrument_type(instrument_type: InstrumentType) -> InstrumentType {
+        fn get_underlying_instrument_type(instrument_type: OptionType) -> OptionType {
             match instrument_type {
-                InstrumentType::EquityOption => InstrumentType::Equity,
-                InstrumentType::FutureOption => InstrumentType::Future,
+                OptionType::EquityOption => OptionType::Equity,
+                OptionType::FutureOption => OptionType::Future,
                 _ => panic!("Unsupported Type"),
             }
         }
@@ -361,7 +370,7 @@ impl Strategies {
             symbol: &str,
             underlying: &str,
             event_type: &str,
-            option_type: InstrumentType,
+            option_type: OptionType,
             strike_price: Option<Decimal>,
             mktdata: Arc<RwLock<MktData>>,
         ) {
@@ -392,11 +401,11 @@ impl Strategies {
             let underlying = strategy.get_underlying();
             for leg in strategy.get_position().legs.iter() {
                 subscribe_to_symbol(
-                    leg.symbol(),
+                    &leg.symbol,
                     underlying,
                     "Quote",
-                    leg.instrument_type(),
-                    Some(leg.strike_price()),
+                    leg.option_type,
+                    Some(leg.strike_price),
                     mktdata.clone(),
                 )
                 .await;
@@ -434,7 +443,7 @@ impl Strategies {
         where
             Strat: StrategyMeta,
         {
-            let price_effect = match strat.get_position().legs[0].direction() {
+            let price_effect = match strat.get_position().legs[0].direction {
                 Direction::Short => PriceEffect::Credit,
                 Direction::Long => PriceEffect::Debit,
             };
