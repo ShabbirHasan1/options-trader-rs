@@ -154,7 +154,7 @@ impl Strategies {
                 underlying,
                 underlying,
                 "Quote",
-                get_underlying_instrument_type(strategy.get_option_type()),
+                get_underlying_instrument_type(strategy.get_type()),
                 None,
                 mktdata.clone(),
             )
@@ -166,8 +166,9 @@ impl Strategies {
                 Strategy::Credit(strategy) => {
                     subscribe_to_option_and_underlying(strategy, mktdata).await
                 }
-                // Strategy::Calendar(strat) => subscribe(strat, mktdata).await,
-                // Strategy::Condor(strat) => subscribe(strat, mktdata).await,
+                Strategy::Condor(strategy) => {
+                    subscribe_to_option_and_underlying(strategy, mktdata).await
+                }
                 _ => (),
             }
         }
@@ -182,9 +183,9 @@ impl Strategies {
         where
             Strat: StrategyMeta,
         {
-            let price_effect = match strat.get_position().legs[0].direction {
-                Direction::Short => PriceEffect::Credit,
-                Direction::Long => PriceEffect::Debit,
+            let price_effect = match strat.get_price_effect() {
+                PriceEffect::Credit => PriceEffect::Debit,
+                PriceEffect::Debit => PriceEffect::Credit,
             };
             orders
                 .write()

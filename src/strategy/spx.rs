@@ -1,3 +1,4 @@
+use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -21,7 +22,11 @@ impl SpxStrategy {
         }
     }
 
-    pub async fn enter_position<Meta>(orders: &Arc<RwLock<Orders>>, price_effect: PriceEffect) {
+    pub async fn enter_position(
+        price: Decimal,
+        orders: &Arc<RwLock<Orders>>,
+        price_effect: PriceEffect,
+    ) {
         // if let Err(err) = orders
         //     .write()
         //     .await

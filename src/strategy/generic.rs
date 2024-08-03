@@ -15,13 +15,29 @@ use tracing::info;
 
 use super::spx::SpxStrategy;
 use crate::connectivity::web_client::WebClient;
+use crate::platform::mktdata;
 use crate::platform::{account::Account, mktdata::*, orders::*, positions::*};
 use crate::tt_api::{mktdata::Quote, positions::AccountPositions, positions::Leg};
+
+fn get_mid_price(snapshot: &Snapshot) -> Decimal {
+    if let Some(quote) = &snapshot.quote {
+        return quote.midprice();
+    }
+    Decimal::default()
+}
+
+pub enum Direction {
+    Bullish,
+    Bearish,
+    Neutral,
+}
 
 pub(crate) trait StrategyMeta: Sync + Send {
     fn get_underlying(&self) -> &str;
     fn get_symbols(&self) -> Vec<&str>;
-    fn get_option_type(&self) -> OptionType;
+    fn get_direction(&self) -> Direction;
+    fn get_price_effect(&self) -> PriceEffect;
+    fn get_type(&self) -> OptionType;
     fn get_position(&self) -> &Position;
 }
 
@@ -34,6 +50,30 @@ impl CreditSpread {
         Self { position }
     }
 
+    pub async fn calculate_mid_price(
+        underlying: &str,
+        direction: Direction,
+        mktdata: Arc<RwLock<MktData>>,
+    ) -> Decimal {
+        let reader = mktdata.read().await;
+        let snapshots = reader
+            .group_snapshots_by_underlying::<Quote>(underlying)
+            .await;
+        let (short_option_mid, long_option_mid) = match direction {
+            Direction::Bearish => (get_mid_price(&snapshots[1]), get_mid_price(&snapshots[0])),
+            Direction::Bullish => (get_mid_price(&snapshots[0]), get_mid_price(&snapshots[1])),
+            _ => panic!("No neutral option side on a credit spread"),
+        };
+
+        let mid_price = short_option_mid - long_option_mid;
+
+        info!(
+            "New calc symbol:{} mid: {} (sold: {}, bought: {})",
+            underlying, mid_price, short_option_mid, long_option_mid
+        );
+        mid_price
+    }
+
     pub async fn should_exit(&self, mktdata: Arc<RwLock<MktData>>) -> bool {
         fn get_option_type(position: &Position) -> OptionSide {
             position.legs[0].side
@@ -43,6 +83,7 @@ impl CreditSpread {
             match get_option_type(position) {
                 OptionSide::Call => position.legs[1].strike_price,
                 OptionSide::Put => position.legs[0].strike_price,
+                _ => panic!("No neutral option side on a credit spread"),
             }
         }
 
@@ -68,6 +109,7 @@ impl CreditSpread {
             let result = match get_option_type(&self.position) {
                 OptionSide::Call => strike_price < mid_price,
                 OptionSide::Put => strike_price > mid_price,
+                _ => panic!("No neutral option side on a credit spread"),
             };
 
             info!(
@@ -111,12 +153,23 @@ impl StrategyMeta for CreditSpread {
             .collect()
     }
 
-    fn get_option_type(&self) -> OptionType {
+    fn get_type(&self) -> OptionType {
         self.position.legs.first().unwrap().option_type
     }
 
     fn get_position(&self) -> &Position {
         &self.position
+    }
+
+    fn get_direction(&self) -> Direction {
+        match self.position.legs[0].side {
+            OptionSide::Call => Direction::Bearish,
+            OptionSide::Put => Direction::Bullish,
+            _ => panic!("No neutral option side on a credit spread"),
+        }
+    }
+    fn get_price_effect(&self) -> PriceEffect {
+        PriceEffect::Credit
     }
 }
 
@@ -127,6 +180,10 @@ pub(crate) struct CalendarSpread {
 impl CalendarSpread {
     pub fn new(position: Position) -> Self {
         Self { position }
+    }
+
+    async fn calculate_mid_price(&self, _mktdata: Arc<RwLock<MktData>>) -> Decimal {
+        dec!(0)
     }
 
     pub async fn should_exit(&self, mktdata: &MktData) -> bool {
@@ -145,6 +202,7 @@ impl CalendarSpread {
         info!("{}", &self);
     }
 }
+
 impl fmt::Display for CalendarSpread {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -169,12 +227,20 @@ impl StrategyMeta for CalendarSpread {
             .collect()
     }
 
-    fn get_option_type(&self) -> OptionType {
+    fn get_type(&self) -> OptionType {
         self.position.legs.first().unwrap().option_type
     }
 
     fn get_position(&self) -> &Position {
         &self.position
+    }
+
+    fn get_direction(&self) -> Direction {
+        Direction::Neutral
+    }
+
+    fn get_price_effect(&self) -> PriceEffect {
+        PriceEffect::Credit
     }
 }
 
@@ -185,6 +251,28 @@ pub(crate) struct IronCondor {
 impl IronCondor {
     pub fn new(position: Position) -> Self {
         Self { position }
+    }
+
+    pub async fn calculate_mid_price(underlying: &str, mktdata: Arc<RwLock<MktData>>) -> Decimal {
+        let reader = mktdata.read().await;
+        let snapshots = reader
+            .group_snapshots_by_underlying::<Quote>(underlying)
+            .await;
+
+        let long_call_mid = get_mid_price(&snapshots[0]);
+        let short_call_mid = get_mid_price(&snapshots[1]);
+        let short_put_mid = get_mid_price(&snapshots[2]);
+        let long_put_mid = get_mid_price(&snapshots[3]);
+
+        let mid_price = (short_call_mid - long_call_mid) + (short_put_mid - long_put_mid);
+
+        info!(
+            "New calc mid: {} call spread: {} put spread: {}",
+            mid_price,
+            short_call_mid - long_call_mid,
+            short_put_mid - long_put_mid,
+        );
+        mid_price
     }
 
     //Matches the near leg strike price against underlying mid price
@@ -241,11 +329,19 @@ impl StrategyMeta for IronCondor {
             .collect()
     }
 
-    fn get_option_type(&self) -> OptionType {
+    fn get_type(&self) -> OptionType {
         self.position.legs.first().unwrap().option_type
     }
 
     fn get_position(&self) -> &Position {
         &self.position
+    }
+
+    fn get_direction(&self) -> Direction {
+        Direction::Neutral
+    }
+
+    fn get_price_effect(&self) -> PriceEffect {
+        PriceEffect::Credit
     }
 }

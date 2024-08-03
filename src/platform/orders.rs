@@ -13,9 +13,12 @@ use tracing::info;
 use tracing::warn;
 
 use super::mktdata::*;
-use super::positions::*;
+use super::positions::PriceEffect;
+use super::positions::{Direction as PosDir, Position, StrategyType};
 use crate::connectivity::web_client::WebClient;
-use crate::strategy::generic::StrategyMeta;
+use crate::strategy::generic::{
+    CalendarSpread, CreditSpread, Direction as StratDir, IronCondor, StrategyMeta,
+};
 use crate::tt_api::{mktdata::Quote, orders::*, sessions::Payload};
 
 #[derive(Debug)]
@@ -39,48 +42,20 @@ impl fmt::Display for OrderType {
 }
 
 async fn calculate_midprice(
+    underlying: &str,
+    direction: StratDir,
     strategy_type: StrategyType,
-    symbol: &str,
     mktdata: &Arc<RwLock<MktData>>,
-    order: &Order,
 ) -> Result<Decimal> {
-    fn get_mid_price(snapshot: &Snapshot) -> Decimal {
-        if let Some(quote) = &snapshot.quote {
-            return quote.midprice();
-        }
-        Decimal::default()
-    }
-
-    let reader = mktdata.read().await;
     let calculated_midprice = match strategy_type {
-        StrategyType::CreditSpread | StrategyType::CalendarSpread => {
-            let snapshots = reader.group_snapshots_by_underlying::<Quote>(symbol).await;
-            let mid_price = get_mid_price(&snapshots[0]) + get_mid_price(&snapshots[1]) / dec!(2);
-
-            info!("New calc symbol:{} mid: {}", symbol, mid_price);
-            mid_price
+        StrategyType::CreditSpread => {
+            CreditSpread::calculate_mid_price(underlying, direction, mktdata.clone()).await
         }
         StrategyType::IronCondor => {
-            let snapshots = reader.group_snapshots_by_underlying::<Quote>(symbol).await;
-            let call_mid_price =
-                get_mid_price(&snapshots[0]) + get_mid_price(&snapshots[1]) / dec!(2);
-
-            let put_mid_price =
-                get_mid_price(&snapshots[2]) + get_mid_price(&snapshots[3]) / dec!(2);
-
-            let mid_price = call_mid_price + put_mid_price / dec!(2);
-            info!(
-                "New calc mid: {} call spread: {} put spread: {}",
-                mid_price, call_mid_price, put_mid_price,
-            );
-            mid_price
+            IronCondor::calculate_mid_price(underlying, mktdata.clone()).await
         }
-        _ => Decimal::default(),
+        _ => dec!(0.0),
     };
-    debug!(
-        "For leg symbol: {}, calculated midprice: {}",
-        order.legs[0].symbol, calculated_midprice,
-    );
 
     Ok(calculated_midprice)
 }
@@ -89,17 +64,10 @@ fn build_order<Meta>(meta_data: &Meta, price_effect: PriceEffect) -> Result<Orde
 where
     Meta: StrategyMeta,
 {
-    fn get_action(direction: Direction) -> String {
+    fn get_action(direction: PosDir) -> String {
         match direction {
-            Direction::Long => String::from("Sell to Close"),
-            Direction::Short => String::from("Buy to Close"),
-        }
-    }
-
-    fn get_symbol(symbol: &str, instrument_type: OptionType) -> String {
-        match instrument_type {
-            OptionType::FutureOption => symbol.to_string(),
-            _ => symbol.to_string(),
+            PosDir::Long => String::from("Sell to Close"),
+            PosDir::Short => String::from("Buy to Close"),
         }
     }
 
@@ -113,7 +81,7 @@ where
             .iter()
             .map(|leg| Leg {
                 instrument_type: leg.option_type.to_string(),
-                symbol: get_symbol(&leg.symbol, leg.option_type),
+                symbol: leg.symbol.clone(),
                 quantity: leg.quantity,
                 action: get_action(leg.direction),
             })
@@ -200,10 +168,10 @@ impl Orders {
 
         // if not in flight find the midprice of strategy
         let midprice = calculate_midprice(
-            meta_data.get_position().strategy_type,
             meta_data.get_underlying(),
+            meta_data.get_direction(),
+            meta_data.get_position().strategy_type,
             &self.mkt_data,
-            &order,
         )
         .await?;
         info!(

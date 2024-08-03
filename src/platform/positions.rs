@@ -22,6 +22,7 @@ pub enum StrategyType {
 pub enum OptionSide {
     Call,
     Put,
+    Neutral,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -282,6 +283,7 @@ impl Position {
         match symbols[0].side {
             OptionSide::Call => StrategyType::Call,
             OptionSide::Put => StrategyType::Put,
+            _ => panic!("No neutral option side"),
         }
     }
 
