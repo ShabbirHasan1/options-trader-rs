@@ -7,21 +7,14 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-mod account;
-mod db_client;
-mod mktdata;
-mod orders;
-mod positions;
-mod settings;
-mod strategies;
+mod connectivity;
+mod platform;
+mod strategy;
 mod tt_api;
-mod web_client;
 
-use db_client::DBClient;
-use settings::Config;
-use strategies::Strategies;
-use web_client::EndPoint;
-use web_client::WebClient;
+use connectivity::web_client::{EndPoint, WebClient};
+use platform::settings::Config;
+use strategy::monitor::Strategies;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -30,7 +23,15 @@ struct Args {
     settings: String,
 }
 
-fn start_logging() {
+fn get_log_level(level: &str) -> tracing::Level {
+    match level.to_lowercase().as_str() {
+        "debug" => tracing::Level::DEBUG,
+        "info" => tracing::Level::INFO,
+        _ => tracing::Level::WARN,
+    }
+}
+
+fn start_logging(log_level: &str) {
     let subscriber = tracing_subscriber::fmt()
         // Display source code file paths
         .with_file(true)
@@ -41,7 +42,7 @@ fn start_logging() {
         // Don't display the event's target (module path)
         .with_target(false)
         // Assign a log-level
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(get_log_level(log_level))
         // Use a more compact, abbreviated log format
         .compact()
         .finish();
@@ -54,19 +55,6 @@ fn graceful_shutdown(is_graceful_shutdown: &mut bool, shutdown_signal: &Cancella
     shutdown_signal.cancel();
 }
 
-async fn startup_db() -> DBClient {
-    let config =
-        env::var("OPTIONS_CFG").expect("Failed to get the cfg file from the environment variable.");
-    let settings = Config::read_config_file(&config).expect("Failed to parse config file");
-    match DBClient::new(&settings).await {
-        Err(val) => {
-            info!("Settings file error: {val}");
-            std::process::exit(1);
-        }
-        Ok(val) => val,
-    }
-}
-
 const BASE_URL_UAT: &str = "api.cert.tastyworks.com";
 const BASE_URL_PROD: &str = "api.tastyworks.com";
 
@@ -75,16 +63,18 @@ const WS_URL_PROD: &str = "streamer.tastyworks.com";
 
 #[tokio::main]
 async fn main() {
-    start_logging();
-    info!("___/********Options Trader********\\___");
     let cmdline_args = Args::parse();
     let settings = match Config::read_config_file(cmdline_args.settings.as_str()) {
         Err(val) => {
-            info!("Settings file error: {val}");
+            println!("Settings file error: {val}");
             std::process::exit(1);
         }
         Ok(val) => val,
     };
+    start_logging(settings.log_level.as_str());
+
+    info!("___/********Options Trader********\\___");
+
     let cancel_token = CancellationToken::new();
     let (http_url, ws_url) = if settings.endpoint.eq(&EndPoint::Live) {
         (BASE_URL_PROD, WS_URL_PROD)
@@ -98,7 +88,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let db = startup_db().await;
+    let db = platform::db_client::startup_db(&settings).await;
     let mut is_graceful_shutdown = false;
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
     if let Err(err) = web_client.startup(ws_url, settings, &db).await {
@@ -130,5 +120,34 @@ async fn main() {
                 graceful_shutdown(&mut is_graceful_shutdown, &cancel_token);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing::Instrument;
+
+    use super::*;
+
+    async fn setup() -> anyhow::Result<Strategies> {
+        let config = env::var("OPTIONS_CFG")
+            .expect("Failed to get the cfg file from the environment variable.");
+        let settings = Config::read_config_file(&config).expect("Failed to parse config file");
+        let cancel_token = CancellationToken::new();
+        let (http_url, ws_url) = (BASE_URL_UAT, WS_URL_UAT);
+        let mut web_client = WebClient::new(http_url, cancel_token.clone())
+            .await
+            .unwrap();
+        let db = platform::db_client::startup_db(&settings).await;
+        web_client.startup(ws_url, settings, &db).await.unwrap();
+        Strategies::new(Arc::new(web_client), cancel_token.clone()).await
+    }
+
+    #[tokio::test]
+    async fn test() {
+        //write a test to place and order
+        let strategies = setup().await.unwrap();
+        let spx_strategy = strategies.get_spx();
+        // spx_strategy.enter_position().await;
     }
 }

@@ -4,7 +4,6 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::to_string as to_json;
-
 use surf::middleware::Middleware;
 use surf::Client;
 use surf::Request;
@@ -12,7 +11,6 @@ use surf::RequestBuilder;
 use tracing::debug;
 use tracing::info;
 use url::Url;
-// Custom middleware to log requests before they are sent
 
 #[derive(Clone, Debug)]
 pub struct HttpClient {

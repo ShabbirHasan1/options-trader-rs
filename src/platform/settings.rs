@@ -2,23 +2,15 @@ use serde::Deserialize;
 use std::fs::File;
 use std::io::prelude::*;
 
-use crate::web_client::EndPoint;
+use crate::connectivity::web_client::EndPoint;
+use crate::platform::db_client::DatabaseConfig;
 use anyhow::Result;
 
 #[derive(Debug, Deserialize)]
 pub struct Settings {
-    pub username: String,
     pub endpoint: EndPoint,
     pub log_level: String,
     pub database: DatabaseConfig,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DatabaseConfig {
-    pub name: String,
-    pub port: u16,
-    pub host: String,
-    pub user: String,
 }
 
 #[derive(Debug)]

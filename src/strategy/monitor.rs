@@ -13,56 +13,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
 
-// use crate::mktdata::tt_api::CandleData;
-use super::account::Account;
-use super::mktdata::MktData;
-use super::orders::Orders;
-use super::positions::Position;
-use super::web_client::WebClient;
-use crate::mktdata::Snapshot;
-use crate::positions::Direction;
-use crate::positions::OptionLeg;
-use crate::positions::OptionSide;
-use crate::positions::OptionType;
-use crate::positions::PriceEffect;
-use crate::positions::StrategyType;
-use crate::tt_api::mktdata::Quote;
-use crate::tt_api::positions::AccountPositions;
-use crate::tt_api::positions::Leg;
-
-struct SpxSpread {
-    web_client: Arc<RwLock<WebClient>>,
-}
-
-impl SpxSpread {
-    fn new(web_client: Arc<RwLock<WebClient>>) -> Self {
-        Self::market_monitor();
-        Self { web_client }
-    }
-
-    fn market_monitor() {
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = sleep(Duration::from_secs(5)) => {
-                    // if orders.has_symbol() {
-                    //     return
-                    // }
-
-                    // let diretion = get_market_conditions();
-                    // if diretion.is_none() {
-                    //     return
-                    // }
-                    // let _ = orders.enter_position();
-                }
-            }
-        });
-    }
-}
+use super::spx::SpxStrategy;
+use crate::connectivity::web_client::WebClient;
+use crate::platform::{account::Account, mktdata::*, orders::*, positions::*};
+use crate::tt_api::{mktdata::Quote, positions::AccountPositions, positions::Leg};
 
 pub(crate) trait StrategyMeta: Sync + Send {
     fn get_underlying(&self) -> &str;
     fn get_symbols(&self) -> Vec<&str>;
-    fn get_instrument_type(&self) -> OptionType;
+    fn get_option_type(&self) -> OptionType;
     fn get_position(&self) -> &Position;
 }
 
@@ -75,7 +34,7 @@ impl CreditSpread {
         Self { position }
     }
 
-    async fn should_exit(&self, mktdata: &MktData) -> bool {
+    async fn should_exit(&self, mktdata: Arc<RwLock<MktData>>) -> bool {
         fn get_option_type(position: &Position) -> OptionSide {
             position.legs[0].side
         }
@@ -95,6 +54,8 @@ impl CreditSpread {
         }
 
         let mkt_event = mktdata
+            .read()
+            .await
             .get_snapshot_by_symbol::<Quote>(self.get_underlying())
             .await;
 
@@ -150,7 +111,7 @@ impl StrategyMeta for CreditSpread {
             .collect()
     }
 
-    fn get_instrument_type(&self) -> OptionType {
+    fn get_option_type(&self) -> OptionType {
         self.position.legs.first().unwrap().option_type
     }
 
@@ -208,7 +169,7 @@ impl StrategyMeta for CalendarSpread {
             .collect()
     }
 
-    fn get_instrument_type(&self) -> OptionType {
+    fn get_option_type(&self) -> OptionType {
         self.position.legs.first().unwrap().option_type
     }
 
@@ -227,12 +188,14 @@ impl IronCondor {
     }
 
     //Matches the near leg strike price against underlying mid price
-    async fn should_exit(&self, mktdata: &MktData) -> bool {
+    async fn should_exit(&self, mktdata: Arc<RwLock<MktData>>) -> bool {
         fn get_strike_prices(position: &Position) -> (Decimal, Decimal) {
             (position.legs[1].strike_price, position.legs[2].strike_price)
         }
 
         let mkt_event = mktdata
+            .read()
+            .await
             .get_snapshot_by_symbol::<Quote>(self.get_underlying())
             .await;
 
@@ -278,7 +241,7 @@ impl StrategyMeta for IronCondor {
             .collect()
     }
 
-    fn get_instrument_type(&self) -> OptionType {
+    fn get_option_type(&self) -> OptionType {
         self.position.legs.first().unwrap().option_type
     }
 
@@ -294,7 +257,10 @@ enum Strategy {
     NotTracked,
 }
 
-pub(crate) struct Strategies {}
+pub(crate) struct Strategies {
+    mktdata: Arc<RwLock<MktData>>,
+    orders: Arc<RwLock<Orders>>,
+}
 
 impl Strategies {
     pub async fn new(web_client: Arc<WebClient>, cancel_token: CancellationToken) -> Result<Self> {
@@ -303,11 +269,11 @@ impl Strategies {
             Arc::clone(&web_client),
             cancel_token.clone(),
         )));
-        let mut orders = Orders::new(
+        let orders = Arc::new(RwLock::new(Orders::new(
             Arc::clone(&web_client),
             Arc::clone(&mktdata),
             cancel_token.clone(),
-        );
+        )));
         let mut strategies = match Self::get_strategies(&web_client).await {
             Ok(val) => val,
             Err(err) => bail!(
@@ -315,8 +281,10 @@ impl Strategies {
                 err
             ),
         };
-        Self::subscribe_to_updates(&strategies, &mktdata, &cancel_token).await;
+        Self::subscribe_to_updates(&strategies, &mktdata).await;
 
+        let mktdata_cpy = Arc::clone(&mktdata);
+        let orders_cpy = Arc::clone(&orders);
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -326,7 +294,7 @@ impl Strategies {
                     _ = sleep(Duration::from_secs(30)) => {
                         strategies = match Self::get_strategies(&web_client).await {
                             Ok(val) => {
-                                Self::subscribe_to_updates(&val, &mktdata, &cancel_token).await;
+                                Self::subscribe_to_updates(&val, &mktdata).await;
                                 val
                             }
                             Err(err) => {
@@ -337,9 +305,8 @@ impl Strategies {
                         }
                     }
                     _ = sleep(Duration::from_secs(5)) => {
-                        let read_guard = mktdata.read().await;
                         for strategy in &strategies {
-                            if let Err(err) = Self::check_stops(strategy, &read_guard, &mut orders).await {
+                            if let Err(err) = Self::check_stops(strategy, &mktdata, &orders).await {
                                 error!("Issue checking stops, error: {}", err);
                             }
                         }
@@ -350,14 +317,17 @@ impl Strategies {
                 }
             }
         });
-        Ok(Self {})
+        Ok(Self {
+            mktdata: mktdata_cpy,
+            orders: orders_cpy,
+        })
     }
 
-    async fn subscribe_to_updates(
-        strategies: &[Strategy],
-        mktdata: &Arc<RwLock<MktData>>,
-        _cancel_token: &CancellationToken,
-    ) {
+    pub fn get_spx(&self) -> SpxStrategy {
+        SpxStrategy::new(self.mktdata.clone(), self.orders.clone())
+    }
+
+    async fn subscribe_to_updates(strategies: &[Strategy], mktdata: &Arc<RwLock<MktData>>) {
         fn get_underlying_instrument_type(instrument_type: OptionType) -> OptionType {
             match instrument_type {
                 OptionType::EquityOption => OptionType::Equity,
@@ -415,7 +385,7 @@ impl Strategies {
                 underlying,
                 underlying,
                 "Quote",
-                get_underlying_instrument_type(strategy.get_instrument_type()),
+                get_underlying_instrument_type(strategy.get_option_type()),
                 None,
                 mktdata.clone(),
             )
@@ -436,10 +406,10 @@ impl Strategies {
 
     async fn check_stops(
         strategy: &Strategy,
-        mktdata: &MktData,
-        orders: &mut Orders,
+        mktdata: &Arc<RwLock<MktData>>,
+        orders: &Arc<RwLock<Orders>>,
     ) -> Result<()> {
-        async fn send_liquidate<Strat>(strat: &Strat, orders: &mut Orders) -> Result<()>
+        async fn send_liquidate<Strat>(strat: &Strat, orders: Arc<RwLock<Orders>>) -> Result<()>
         where
             Strat: StrategyMeta,
         {
@@ -447,13 +417,17 @@ impl Strategies {
                 Direction::Short => PriceEffect::Credit,
                 Direction::Long => PriceEffect::Debit,
             };
-            orders.liquidate_position(strat, price_effect).await
+            orders
+                .write()
+                .await
+                .open_position(strat, price_effect)
+                .await
         }
 
         match strategy {
             Strategy::Credit(strat) => {
-                if strat.should_exit(mktdata).await {
-                    match send_liquidate(strat, orders).await {
+                if strat.should_exit(mktdata.clone()).await {
+                    match send_liquidate(strat, orders.clone()).await {
                         Ok(val) => val,
                         Err(err) => error!("Failed to liquidate position, error: {}", err),
                     }
@@ -467,14 +441,14 @@ impl Strategies {
             //         }
             //     }
             // }
-            // Strategy::Condor(strat) => {
-            //     if strat.should_exit(mktdata).await {
-            //         match send_liquidate(strat, orders).await {
-            //             Ok(val) => val,
-            //             Err(err) => error!("Failed to liquidate position, error: {}", err),
-            //         }
-            //     }
-            // }
+            Strategy::Condor(strat) => {
+                if strat.should_exit(mktdata.clone()).await {
+                    match send_liquidate(strat, orders.clone()).await {
+                        Ok(val) => val,
+                        Err(err) => error!("Failed to liquidate position, error: {}", err),
+                    }
+                }
+            }
             _ => (),
         }
         Ok(())

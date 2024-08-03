@@ -20,10 +20,9 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-use crate::positions::OptionType;
+use super::positions::OptionType;
+use crate::connectivity::web_client::WebClient;
 use crate::tt_api::mktdata::*;
-
-use super::web_client::WebClient;
 
 const UTF8_ECODING: &AsciiSet = &CONTROLS.add(b' ').add(b'/');
 
@@ -116,7 +115,7 @@ impl MktData {
 
         match serde_json::from_str::<FeedDataMessage>(&msg) {
             serde_json::Result::Ok(mut msg) => {
-                debug!("Last mktdata message received, msg: {:?}", msg);
+                info!("Last mktdata message received, msg: {:?}", msg);
 
                 let mut writer = events.lock().await;
                 writer.iter_mut().for_each(|snapshot| {
@@ -163,7 +162,7 @@ impl MktData {
         );
 
         self.web_client
-            .subscribe_to_symbol(&streamer_symbol, event_type)
+            .subscribe_to_symbol(&streamer_symbol, event_type, instrument_type)
             .await?;
         Self::stash_subscription(
             &mut self.events,
@@ -206,10 +205,11 @@ impl MktData {
         let reader = self.events.lock().await;
         let mut events = reader
             .iter()
-            .filter(|snapshot| snapshot.symbol == symbol)
+            .filter(|snapshot| snapshot.underlying.eq(symbol))
+            .filter(|snapshot| snapshot.symbol.ne(symbol))
             .cloned()
             .collect::<Vec<_>>();
-        events.sort_by(|a, b| a.strike_price.cmp(&b.strike_price));
+        events.sort_by(|a, b| a.strike_price.unwrap().cmp(&b.strike_price.unwrap()));
 
         if !events.is_empty() {
             events.iter().for_each(|event| {

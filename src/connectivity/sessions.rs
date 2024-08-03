@@ -5,7 +5,6 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::to_string as to_json;
-use sqlx::FromRow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast::Sender;
@@ -16,11 +15,10 @@ use tracing::error;
 use tracing::info;
 use url::Url;
 
-use crate::web_client::sessions::md_api::AddItem;
+use crate::platform::positions::OptionType;
+use crate::tt_api::sessions::*;
 
-use self::md_api::FeedData;
-use self::md_api::Header;
-use super::ApiQuoteToken;
+use crate::tt_api::mktdata::ApiQuoteToken;
 
 pub trait WsSession {
     fn url(&self) -> Url;
@@ -39,42 +37,6 @@ pub trait WsSession {
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static;
 }
 
-pub(crate) mod acc_api {
-    use super::*;
-    #[derive(Clone, Default, Debug, Serialize, Deserialize)]
-    pub struct AccHeartbeat {
-        pub action: String,
-        #[serde(rename = "auth-token")]
-        pub auth_token: String,
-    }
-
-    #[derive(Clone, Default, Debug, Deserialize)]
-    pub struct Response {
-        pub status: String,
-        pub action: String,
-        #[serde(rename = "web-socket-session-id")]
-        pub websocket_session_id: String,
-        pub value: Option<Vec<String>>,
-        #[serde(rename = "request-id")]
-        pub request_id: u8,
-    }
-
-    #[derive(FromRow, Clone, Default, Debug, Serialize, Deserialize)]
-    pub struct Connect {
-        pub action: String,
-        #[serde(rename = "value")]
-        pub account_ids: Vec<String>,
-        #[serde(rename = "auth-token")]
-        pub auth_token: String,
-    }
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct Payload {
-        #[serde(rename = "type")]
-        pub msg_type: String,
-        pub data: String,
-        pub timestamp: u32,
-    }
-}
 #[derive(Clone, Debug)]
 pub struct AccountSession {
     url: Url,
@@ -107,8 +69,8 @@ impl AccountSession {
         }))
     }
 
-    pub async fn startup(&mut self, account_id: &str, auth_token: &str) -> acc_api::Connect {
-        let connect = acc_api::Connect {
+    pub fn startup(&mut self, account_id: &str, auth_token: &str) -> ConnectAccounts {
+        let connect = ConnectAccounts {
             action: "connect".to_string(),
             account_ids: vec![account_id.to_string()],
             auth_token: auth_token.to_string(),
@@ -153,7 +115,7 @@ impl WsSession for AccountSession {
     }
 
     fn get_heart_beat_message(&self) -> String {
-        let heartbeat = acc_api::AccHeartbeat {
+        let heartbeat = AccHeartbeat {
             action: "heartbeat".to_string(),
             auth_token: self.auth_token.clone(),
         };
@@ -176,9 +138,7 @@ impl WsSession for AccountSession {
             "[Account Session] response on account session, msg: {}",
             response
         );
-        if let serde_json::Result::Ok(response) =
-            serde_json::from_str::<acc_api::Response>(&response)
-        {
+        if let serde_json::Result::Ok(response) = serde_json::from_str::<Response>(&response) {
             if response.status.eq("ok") {
                 match response.action.as_str() {
                     "connect" => {
@@ -201,140 +161,6 @@ impl WsSession for AccountSession {
         } else {
             let _ = self.to_app.send(response).unwrap();
         }
-    }
-}
-
-pub(crate) mod md_api {
-
-    use super::*;
-
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct Header {
-        #[serde(rename = "type")]
-        pub msg_type: String,
-        pub channel: u64,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct ChannelRequest {
-        #[serde(flatten)]
-        pub msg: Header,
-        pub service: String,
-        pub parameters: Parameters,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct FeedSubscription {
-        #[serde(flatten)]
-        pub msg: Header,
-        pub add: Vec<AddItem>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct ClientChannelRequest {
-        #[serde(rename = "type")]
-        pub msg_type: String,
-        pub service: String,
-        pub parameters: Parameters,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct ClientFeedSubscription {
-        #[serde(flatten)]
-        pub msg: Header,
-        pub add: Vec<AddItem>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct Parameters {
-        pub contract: String,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct AddItem {
-        pub symbol: String,
-        #[serde(rename = "type")]
-        pub msg_type: String,
-        // #[serde(skip_serializing_if = "Option::is_none")]
-        // pub from_time: Option<i64>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct FeedSetup {
-        #[serde(flatten)]
-        pub msg: Header,
-        #[serde(rename = "acceptAggregationPeriod")]
-        pub accept_aggregation_period: Option<i64>,
-        #[serde(rename = "acceptDataFormat")]
-        pub accept_data_format: Option<String>,
-        #[serde(rename = "acceptEventFields")]
-        pub accept_event_fields: Option<AcceptEventFields>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct AcceptEventFields {
-        #[serde(rename = "Quote")]
-        pub quote: Option<Vec<String>>,
-        #[serde(rename = "Candle")]
-        pub candle: Option<Vec<String>>,
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct Connect {
-        #[serde(flatten)]
-        pub msg: Header,
-        #[serde(rename = "keepaliveTimeout")]
-        pub keepalive_timeout: u64,
-        #[serde(rename = "acceptKeepaliveTimeout")]
-        pub accept_keepalive_timeout: u64,
-        pub version: String,
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct Candle {
-        #[serde(rename = "Candle")]
-        pub candle: Option<Vec<String>>,
-    }
-
-    // #[derive(Clone, Debug, Serialize, Deserialize)]
-    // pub struct Data {
-    //     pub data: Vec,
-    // }
-
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct FeedData {
-        #[serde(flatten)]
-        pub msg: Header,
-        #[serde(flatten)]
-        pub data: Option<String>,
-        pub state: Option<String>,
-        pub error: Option<String>,
-        pub message: Option<String>,
-        #[serde(rename = "eventFields")]
-        pub event_fields: Option<Candle>,
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct Auth {
-        #[serde(flatten)]
-        pub msg: Header,
-        pub token: String,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct AuthState {
-        pub msg: Header,
-        pub state: String,
-        #[serde(rename = "userId")]
-        pub user_id: Option<String>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct Channel {
-        #[serde(flatten)]
-        pub msg: Header,
-        pub service: String,
-        pub parameters: HashMap<String, String>,
     }
 }
 
@@ -368,8 +194,8 @@ impl MktdataSession {
         }))
     }
 
-    pub async fn startup(&mut self) -> md_api::Connect {
-        md_api::Connect {
+    pub async fn startup(&mut self) -> ConnectMktData {
+        ConnectMktData {
             msg: Header {
                 msg_type: "SETUP".to_string(),
                 channel: 0,
@@ -383,7 +209,7 @@ impl MktdataSession {
     fn handle_auth(&self, payload: FeedData) -> anyhow::Result<()> {
         match payload.state.unwrap().as_str() {
             "UNAUTHORIZED" => {
-                let request = md_api::Auth {
+                let request = Auth {
                     msg: Header {
                         msg_type: "AUTH".to_string(),
                         channel: 0,
@@ -400,7 +226,8 @@ impl MktdataSession {
 
                 let mut parameters = HashMap::new();
                 parameters.insert("contract".to_string(), "AUTO".to_string());
-                let request = md_api::Channel {
+
+                let request = Channel {
                     msg: Header {
                         msg_type: "CHANNEL_REQUEST".to_string(),
                         channel: 1_u64,
@@ -417,7 +244,18 @@ impl MktdataSession {
         }
     }
 
-    pub fn subscribe(&mut self, symbol: Option<&str>, event_type: &[&str]) -> anyhow::Result<()> {
+    pub fn subscribe(
+        &mut self,
+        symbol: Option<&str>,
+        event_type: &[&str],
+        option_type: OptionType,
+    ) -> anyhow::Result<()> {
+        fn get_channel_number(option_type: OptionType) -> u64 {
+            match option_type {
+                OptionType::EquityOption | OptionType::FutureOption => 1_u64,
+                _ => 1_u64,
+            }
+        }
         if let Some(symbol) = symbol {
             self.waiting_on_subscription.push(symbol.to_string());
         }
@@ -433,10 +271,10 @@ impl MktdataSession {
                 })
             })
         });
-        let subscription = md_api::FeedSubscription {
+        let subscription = FeedSubscription {
             msg: Header {
                 msg_type: "FEED_SUBSCRIPTION".to_string(),
-                channel: 1_u64,
+                channel: get_channel_number(option_type),
             },
             add: subscriptions,
         };
@@ -509,8 +347,7 @@ impl WsSession for MktdataSession {
         Session: WsSession + std::marker::Send + std::marker::Sync + 'static,
     {
         debug!("response {}", response);
-        if let serde_json::Result::Ok(payload) = serde_json::from_str::<md_api::FeedData>(&response)
-        {
+        if let serde_json::Result::Ok(payload) = serde_json::from_str::<FeedData>(&response) {
             match payload.msg.msg_type.as_str() {
                 "KEEPALIVE" => {
                     info!("[MktData Session] heartbeat {:?}", payload);
@@ -540,7 +377,7 @@ impl WsSession for MktdataSession {
                         //     },
                         //     accept_aggregation_period: Some(10),
                         //     accept_data_format: Some("FULL".to_string()),
-                        //     accept_event_fields: Some(md_api::AcceptEventFields {
+                        //     accept_event_fields: Some(AcceptEventFields {
                         //         quote: None,
                         //         candle: Some(update),
                         //     }),
@@ -556,7 +393,7 @@ impl WsSession for MktdataSession {
                 }
                 _ => info!("Unknown? {:?} ", payload),
             };
-            // } else if let Ok(response) = serde_json::from_str::<md_api::Channel>(&response) {
+            // } else if let Ok(response) = serde_json::from_str::<Channel>(&response) {
             //     info!("[MktData Session] channel response {:?}", response);
             // } else {
             //     info!("Mktdata? {} ", response);

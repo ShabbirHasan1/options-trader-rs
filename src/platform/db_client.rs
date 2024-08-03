@@ -1,13 +1,32 @@
 use anyhow::bail;
 use anyhow::Ok;
 use anyhow::Result;
+use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Pool;
 use sqlx::Postgres;
 use std::env;
+use tracing::info;
 
 use super::settings::Settings;
 
+#[derive(Debug, Deserialize)]
+pub struct DatabaseConfig {
+    pub name: String,
+    pub port: u16,
+    pub host: String,
+    pub user: String,
+}
+
+pub async fn startup_db(settings: &Settings) -> DBClient {
+    match DBClient::new(&settings).await {
+        Err(val) => {
+            info!("Settings file error: {val}");
+            std::process::exit(1);
+        }
+        anyhow::Result::Ok(val) => val,
+    }
+}
 #[derive(Debug)]
 pub struct SqlQueryBuilder;
 

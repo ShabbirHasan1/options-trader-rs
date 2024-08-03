@@ -3,6 +3,24 @@ use rust_decimal_macros::dec;
 use serde::Deserialize;
 use serde::Serialize;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Wrapper<Response> {
+    pub data: Response,
+    pub context: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ApiQuoteToken {
+    pub token: String,
+    #[serde(rename = "streamer-url")]
+    pub streamer_url: Option<String>,
+    #[serde(rename = "websocket-url")]
+    pub websocket_url: Option<String>,
+    #[serde(rename = "dxlink-url")]
+    pub dxlink_url: String,
+    pub level: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
     #[serde(rename = "type")]
@@ -37,7 +55,7 @@ impl PartialEq for FeedEvent {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 pub struct Quote {
     pub event_symbol: String,
     pub event_time: f64,
@@ -62,7 +80,7 @@ impl Quote {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 pub struct Greeks {
     pub event_flags: f64,
     pub index: f64,

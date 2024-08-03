@@ -14,39 +14,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::info;
 
-pub(crate) mod http_client;
-pub(crate) mod sessions;
-mod websocket;
-
-use crate::db_client::SqlQueryBuilder;
-
-use self::sessions::acc_api;
-use self::sessions::md_api;
-
-use super::db_client::DBClient;
-use super::settings::Settings;
-use http_client::HttpClient;
-use sessions::AccountSession;
-use sessions::MktdataSession;
-use websocket::WebSocketClient;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Wrapper<Response> {
-    data: Response,
-    context: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ApiQuoteToken {
-    token: String,
-    #[serde(rename = "streamer-url")]
-    streamer_url: Option<String>,
-    #[serde(rename = "websocket-url")]
-    websocket_url: Option<String>,
-    #[serde(rename = "dxlink-url")]
-    dxlink_url: String,
-    level: String,
-}
+use crate::connectivity::{http_client::HttpClient, sessions::*, web_socket::WebSocketClient};
+use crate::platform::positions::OptionType;
+use crate::platform::{db_client::*, settings::Settings};
+use crate::tt_api::mktdata::{ApiQuoteToken, Wrapper};
+use crate::tt_api::sessions::ConnectAccounts;
+use crate::tt_api::sessions::ConnectMktData;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum EndPoint {
@@ -162,7 +135,7 @@ impl WebClient {
         settings: Settings,
         db: &DBClient,
     ) -> Result<()> {
-        let mut creds = Self::fetch_auth_from_db(&settings.username, settings.endpoint, db).await?;
+        let mut creds = Self::fetch_auth_from_db(settings.endpoint, db).await?;
         assert!(creds.len() == 1);
         let data = &mut creds[0];
 
@@ -244,25 +217,25 @@ impl WebClient {
         &self.account
     }
 
-    pub async fn subscribe_to_symbol(&self, symbol: &str, event_type: &[&str]) -> Result<()> {
+    pub async fn subscribe_to_symbol(
+        &self,
+        symbol: &str,
+        event_type: &[&str],
+        option_type: OptionType,
+    ) -> Result<()> {
         let client = self.mktdata_ws.as_ref().unwrap();
         client
             .get_session()
             .write()
             .await
-            .subscribe(Some(symbol), event_type)
+            .subscribe(Some(symbol), event_type, option_type)
     }
 
-    async fn fetch_auth_from_db(
-        username: &str,
-        endpoint: EndPoint,
-        db: &DBClient,
-    ) -> Result<Vec<DbStoredCreds>> {
+    async fn fetch_auth_from_db(endpoint: EndPoint, db: &DBClient) -> Result<Vec<DbStoredCreds>> {
         let columns = vec!["username", "endpoint"];
 
         let stmt = SqlQueryBuilder::prepare_fetch_statement("tasty_auth", &columns);
         match sqlx::query_as::<_, DbStoredCreds>(&stmt)
-            .bind(username.to_string())
             .bind::<i32>(endpoint.into())
             .fetch_all(&db.pool)
             .await
@@ -279,7 +252,6 @@ impl WebClient {
         session: &str,
         remember: &str,
         endpoint: EndPoint,
-
         db: &DBClient,
     ) -> Result<()> {
         let stmt = SqlQueryBuilder::prepare_update_statement(
@@ -386,14 +358,13 @@ impl WebClient {
         let auth = account_session
             .write()
             .await
-            .startup(account_id, auth_token)
-            .await;
+            .startup(account_id, auth_token);
 
         let ws_client =
             WebSocketClient::<AccountSession>::new(account_session, cancel_token.clone())?;
 
         ws_client.subscribe_to_events().await?;
-        ws_client.send_message::<acc_api::Connect>(auth).await?;
+        ws_client.send_message::<ConnectAccounts>(auth).await?;
         Ok(ws_client)
     }
 
@@ -411,7 +382,7 @@ impl WebClient {
         let ws_client = WebSocketClient::<MktdataSession>::new(mktdata_session, cancel_token)?;
 
         ws_client.subscribe_to_events().await?;
-        ws_client.send_message::<md_api::Connect>(auth).await?;
+        ws_client.send_message::<ConnectMktData>(auth).await?;
         Ok(ws_client)
     }
 }
