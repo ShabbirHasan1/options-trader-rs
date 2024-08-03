@@ -19,7 +19,7 @@ pub struct DatabaseConfig {
 }
 
 pub async fn startup_db(settings: &Settings) -> DBClient {
-    match DBClient::new(&settings).await {
+    match DBClient::new(settings).await {
         Err(val) => {
             info!("Settings file error: {val}");
             std::process::exit(1);

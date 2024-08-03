@@ -1,9 +1,7 @@
 use anyhow::bail;
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use std::collections::HashMap;
-use std::fmt;
 use std::iter::Iterator;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,13 +9,12 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
-use tracing::info;
 
 use super::generic::*;
 use super::spx::SpxStrategy;
 use crate::connectivity::web_client::WebClient;
 use crate::platform::{account::Account, mktdata::*, orders::*, positions::*};
-use crate::tt_api::{mktdata::Quote, positions::AccountPositions, positions::Leg};
+use crate::tt_api::{positions::AccountPositions, positions::Leg};
 
 enum Strategy {
     Calendar(CalendarSpread),

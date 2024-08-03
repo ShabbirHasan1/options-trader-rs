@@ -14,12 +14,12 @@ use tracing::warn;
 
 use super::mktdata::*;
 use super::positions::PriceEffect;
-use super::positions::{Direction as PosDir, Position, StrategyType};
+use super::positions::{Direction as PosDir, StrategyType};
 use crate::connectivity::web_client::WebClient;
 use crate::strategy::generic::{
-    CalendarSpread, CreditSpread, Direction as StratDir, IronCondor, StrategyMeta,
+    CreditSpread, Direction as StratDir, IronCondor, StrategyMeta,
 };
-use crate::tt_api::{mktdata::Quote, orders::*, sessions::Payload};
+use crate::tt_api::{orders::*, sessions::Payload};
 
 #[derive(Debug)]
 enum OrderType {

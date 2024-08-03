@@ -1,5 +1,3 @@
-use serde::Deserialize;
-use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;

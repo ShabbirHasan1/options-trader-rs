@@ -1,6 +1,5 @@
 use rust_decimal::Decimal;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::RwLock;
 
 use super::generic::StrategyMeta;

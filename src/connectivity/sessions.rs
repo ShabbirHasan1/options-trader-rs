@@ -2,8 +2,6 @@ use anyhow::bail;
 
 use chrono::DateTime;
 use chrono::Utc;
-use serde::Deserialize;
-use serde::Serialize;
 use serde_json::to_string as to_json;
 use std::collections::HashMap;
 use std::sync::Arc;
