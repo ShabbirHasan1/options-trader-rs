@@ -174,11 +174,6 @@ impl Orders {
             &self.mkt_data,
         )
         .await?;
-        info!(
-            "For symbol: {}, Calculated midprice: {}",
-            meta_data.get_underlying(),
-            midprice,
-        );
 
         if midprice.eq(&Decimal::ZERO) {
             warn!("Failed to calculate midprice");
