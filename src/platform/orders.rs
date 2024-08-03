@@ -15,7 +15,7 @@ use tracing::warn;
 use super::mktdata::*;
 use super::positions::*;
 use crate::connectivity::web_client::WebClient;
-use crate::strategy::monitor::StrategyMeta;
+use crate::strategy::generic::StrategyMeta;
 use crate::tt_api::{mktdata::Quote, orders::*, sessions::Payload};
 
 #[derive(Debug)]
@@ -183,7 +183,7 @@ impl Orders {
         false
     }
 
-    pub async fn open_position<Meta>(
+    pub async fn liquidate_position<Meta>(
         &mut self,
         meta_data: &Meta,
         price_effect: PriceEffect,
